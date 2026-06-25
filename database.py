@@ -107,12 +107,22 @@ class Database:
                 ],
             )
 
-    def get_pages(self, job_id: str | None = None) -> list[PageRecord]:
-        params: tuple[str, ...] = ()
+    def get_pages(
+        self,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[PageRecord]:
+        params: list[str | int] = []
         where = ""
         if job_id:
             where = "WHERE job_id = ?"
-            params = (job_id,)
+            params.append(job_id)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
 
         with self._connect() as connection:
             rows = connection.execute(
@@ -122,8 +132,9 @@ class Database:
                 FROM pages
                 {where}
                 ORDER BY id
+                {pagination}
                 """,
-                params,
+                tuple(params),
             ).fetchall()
 
         return [self._row_to_page(row) for row in rows]

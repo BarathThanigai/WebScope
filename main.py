@@ -1,12 +1,21 @@
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
+from config import ALLOWED_ORIGINS
 from crawler import ConcurrentCrawler
 from database import Database, get_database
 from models import CrawlJobResponse, CrawlRequest, CrawlResponse, PageRecord, StatsResponse
 
 app = FastAPI(title="Concurrent Web Crawler")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -18,8 +27,13 @@ def startup() -> None:
 def root() -> dict[str, str | list[str]]:
     return {
         "message": "Welcome to the Concurrent Web Crawler API",
-        "available_endpoints": ["/docs", "/crawl", "/pages", "/stats"],
+        "available_endpoints": ["/docs", "/crawl", "/pages", "/stats", "/health"],
     }
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "service": "Concurrent Web Crawler API"}
 
 
 @app.post("/crawl", response_model=CrawlResponse)
@@ -62,8 +76,13 @@ def crawl_job(job_id: str, db: Database = Depends(get_database)) -> CrawlJobResp
 
 
 @app.get("/pages", response_model=list[PageRecord])
-def pages(db: Database = Depends(get_database)) -> list[PageRecord]:
-    return db.get_pages()
+def pages(
+    job_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Database = Depends(get_database),
+) -> list[PageRecord]:
+    return db.get_pages(job_id=job_id, limit=limit, offset=offset)
 
 
 @app.get("/stats", response_model=StatsResponse)
