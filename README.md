@@ -1,32 +1,78 @@
-# Concurrent Web Crawler
+﻿# WebScope
 
-A deployed-ready full-stack web crawler built with FastAPI, React, Vite, asyncio, aiohttp, BeautifulSoup, and SQLite.
+WebScope is a full-stack Website Intelligence & Audit Platform for practical SEO checks, website health checks, broken link detection, performance analysis, and crawl reporting.
+
+It started as a concurrent web crawler and now includes a FastAPI audit backend, SQLite persistence, and a React + Vite dashboard suitable for a portfolio or internship resume project.
 
 ## Features
 
 - Concurrent BFS-style crawling with `asyncio` and `aiohttp`
 - `robots.txt` checking before page fetches
-- Crawl job IDs with full job detail lookup
-- SQLite storage for jobs and crawled pages
-- Response time tracking in milliseconds
-- Paginated and job-filtered page results
-- React dashboard with crawl form, summary metrics, job details, stats, and page table
-- CORS and environment-based frontend origin configuration
+- Crawl jobs with persistent IDs
+- Safety limits: `max_depth <= 3`, `max_concurrency <= 20`, `max_pages <= 200`
+- Timeout handling and friendly blocked-site messages
+- Broken link detection for failed internal crawl targets and HTTP error pages
+- SEO metadata extraction:
+  - title
+  - meta description
+  - H1 tags
+  - canonical URL
+  - word count
+  - page size in KB
+  - missing title, description, and H1 flags
+- Performance analysis:
+  - response time in milliseconds
+  - slow page flag for pages over 1000 ms
+  - average, min, and max response time per crawl job
+- Crawl report endpoint with health score and top 10 slowest pages
+- CSV export per crawl job
+- React dashboard with Overview, Pages, Broken Links, SEO Issues, and Performance sections
 
-## Project Structure
+## Recommended Test Sites
+
+Use small crawler-friendly demo sites while testing locally:
+
+```text
+https://books.toscrape.com
+https://quotes.toscrape.com
+```
+
+Avoid crawling large production sites without permission.
+
+## Tech Stack
+
+Backend:
+
+- Python
+- FastAPI
+- asyncio
+- aiohttp
+- BeautifulSoup
+- SQLite
+- Pydantic
+
+Frontend:
+
+- React
+- Vite
+- Plain CSS
+
+## Architecture
 
 ```text
 .
-├── main.py
-├── crawler.py
-├── database.py
-├── models.py
-├── config.py
-├── requirements.txt
+├── main.py              # FastAPI routes, CORS, health checks, exports
+├── crawler.py           # Concurrent crawler, robots.txt, SEO extraction
+├── database.py          # SQLite schema, migrations, reports, stats
+├── models.py            # Pydantic request/response models
+├── config.py            # Environment-based CORS config
+├── requirements.txt     # Backend dependencies
+├── .env.example         # Backend env sample
 └── frontend/
     ├── index.html
     ├── package.json
     ├── vite.config.js
+    ├── .env.example     # Frontend env sample
     └── src/
         ├── main.jsx
         └── styles.css
@@ -38,7 +84,7 @@ A deployed-ready full-stack web crawler built with FastAPI, React, Vite, asyncio
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:FRONTEND_URL="http://localhost:5173"
+copy .env.example .env
 uvicorn main:app --reload
 ```
 
@@ -48,7 +94,7 @@ Backend URL:
 http://127.0.0.1:8000
 ```
 
-Interactive API docs:
+API docs:
 
 ```text
 http://127.0.0.1:8000/docs
@@ -59,7 +105,7 @@ http://127.0.0.1:8000/docs
 ```powershell
 cd frontend
 npm install
-$env:VITE_API_URL="http://127.0.0.1:8000"
+copy .env.example .env
 npm run dev
 ```
 
@@ -80,19 +126,29 @@ npm run preview
 
 Backend:
 
-- `FRONTEND_URL`: allowed frontend origin. Defaults to `http://localhost:5173`.
-- `ALLOWED_ORIGINS`: optional comma-separated list of allowed CORS origins.
+```text
+FRONTEND_URL=http://localhost:5173
+ALLOWED_ORIGINS=http://localhost:5173
+```
 
 Frontend:
 
-- `VITE_API_URL`: backend API base URL. Defaults to `http://127.0.0.1:8000`.
+```text
+VITE_API_URL=http://127.0.0.1:8000
+```
 
-## API Usage
-
-### Health Check
+## API Endpoints
 
 ```http
+GET /
 GET /health
+POST /crawl
+GET /crawl/{job_id}
+GET /crawl/{job_id}/broken-links
+GET /crawl/{job_id}/report
+GET /crawl/{job_id}/export/csv
+GET /pages?job_id={job_id}&limit=50&offset=0
+GET /stats
 ```
 
 ### Start a Crawl
@@ -102,105 +158,73 @@ POST /crawl
 Content-Type: application/json
 
 {
-  "seed_url": "https://example.com",
-  "max_depth": 2,
-  "max_concurrency": 10
+  "seed_url": "https://books.toscrape.com",
+  "max_depth": 1,
+  "max_concurrency": 8,
+  "max_pages": 50
 }
 ```
-
-Limits:
-
-- `max_depth`: 0 to 3
-- `max_concurrency`: 1 to 20
 
 Sample response:
 
 ```json
 {
   "job_id": "2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7",
-  "crawled_pages": 4,
-  "total_links_found": 12,
+  "crawled_pages": 50,
+  "total_links_found": 420,
   "failed_requests": 0,
+  "slow_pages": 2,
+  "seo_issues": 8,
+  "health_score": 92,
   "message": "Crawl completed. Full results are available at /crawl/2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7."
 }
 ```
-
-### Get Crawl Details
-
-```http
-GET /crawl/{job_id}
-```
-
-### Get Pages
-
-```http
-GET /pages?limit=50&offset=0
-GET /pages?job_id={job_id}&limit=100&offset=0
-```
-
-### Get Stats
-
-```http
-GET /stats
-```
-
-## Architecture
-
-The backend keeps crawling, persistence, request models, and API routes separate:
-
-- `crawler.py`: concurrency, BFS depth traversal, robots.txt checks, HTML parsing, timeout handling
-- `database.py`: SQLite schema, migrations, job storage, page queries, aggregate stats
-- `models.py`: Pydantic request and response models
-- `main.py`: FastAPI routes, CORS, health checks, endpoint orchestration
-- `config.py`: environment-based deployment settings
-
-The frontend is a Vite React app with a single dashboard-oriented interface. It talks to the API through `VITE_API_URL`, making it portable across local development, Vercel, Render Static Sites, and other hosts.
 
 ## Deployment
 
 ### Backend on Render
 
-1. Create a new Render Web Service.
+1. Create a Render Web Service.
 2. Connect this repository.
-3. Use Python as the runtime.
-4. Set the build command:
+3. Runtime: Python.
+4. Build command:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-5. Set the start command:
+5. Start command:
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-6. Add environment variables:
+6. Environment variables:
 
 ```text
 FRONTEND_URL=https://your-frontend-domain.vercel.app
 ALLOWED_ORIGINS=https://your-frontend-domain.vercel.app
 ```
 
-SQLite works for demos and portfolio deployments. For persistent production data on ephemeral hosts, move storage to a managed database.
+SQLite is fine for demos and portfolio deployments. For durable production data on ephemeral hosting, move storage to Postgres or another managed database.
 
 ### Frontend on Vercel
 
 1. Import the repository in Vercel.
-2. Set the root directory to `frontend`.
-3. Set the build command:
+2. Set root directory to `frontend`.
+3. Build command:
 
 ```bash
 npm run build
 ```
 
-4. Set the output directory:
+4. Output directory:
 
 ```text
 dist
 ```
 
-5. Add environment variable:
+5. Environment variable:
 
 ```text
 VITE_API_URL=https://your-render-backend.onrender.com
@@ -208,27 +232,36 @@ VITE_API_URL=https://your-render-backend.onrender.com
 
 ### Frontend on Render Static Site
 
-1. Create a new Render Static Site.
-2. Set the root directory to `frontend`.
-3. Set the build command:
+1. Create a Render Static Site.
+2. Set root directory to `frontend`.
+3. Build command:
 
 ```bash
 npm install && npm run build
 ```
 
-4. Set the publish directory:
+4. Publish directory:
 
 ```text
 dist
 ```
 
-5. Add `VITE_API_URL` pointing to the deployed backend.
+5. Set `VITE_API_URL` to the deployed backend URL.
 
-## Sample Screenshots
+## Screenshots
 
-Add screenshots here after deploying or running locally:
+Add screenshots here after running or deploying:
 
-- Dashboard crawl form and summary cards
-- Job details table
-- Stats page
-- FastAPI docs at `/docs`
+- WebScope overview dashboard
+- Pages table
+- Broken links tab
+- SEO issues tab
+- Performance tab
+- FastAPI docs
+
+## Resume Bullets
+
+- Built WebScope, a full-stack website audit platform using FastAPI, React, Vite, SQLite, asyncio, aiohttp, and BeautifulSoup.
+- Implemented concurrent BFS crawling with robots.txt compliance, bounded crawl limits, crawl job tracking, timeout handling, and CSV exports.
+- Added SEO metadata extraction, broken link detection, slow page analysis, health scoring, and report endpoints for website intelligence workflows.
+- Designed a responsive React dashboard for crawl setup, audit summaries, broken links, SEO issues, performance reports, and deployment-ready portfolio presentation.

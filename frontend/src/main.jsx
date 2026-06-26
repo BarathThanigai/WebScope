@@ -1,14 +1,23 @@
-import React, { useEffect, useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
-const emptyStats = {
-  total_pages_crawled: 0,
-  total_links_found: 0,
-  failed_requests: 0,
+const emptyReport = {
+  total_pages: 0,
+  total_links: 0,
+  broken_links_count: 0,
+  slow_pages_count: 0,
+  missing_titles_count: 0,
+  missing_descriptions_count: 0,
+  missing_h1_count: 0,
+  seo_issues_count: 0,
   average_response_time_ms: 0,
+  min_response_time_ms: 0,
+  max_response_time_ms: 0,
+  health_score: 0,
+  top_10_slowest_pages: [],
 };
 
 function formatMs(value) {
@@ -16,29 +25,30 @@ function formatMs(value) {
 }
 
 function App() {
-  const [activeView, setActiveView] = useState("dashboard");
-  const [seedUrl, setSeedUrl] = useState("https://example.com");
+  const [seedUrl, setSeedUrl] = useState("https://books.toscrape.com");
   const [maxDepth, setMaxDepth] = useState(1);
-  const [maxConcurrency, setMaxConcurrency] = useState(5);
+  const [maxConcurrency, setMaxConcurrency] = useState(8);
+  const [maxPages, setMaxPages] = useState(50);
+  const [activeTab, setActiveTab] = useState("overview");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [summary, setSummary] = useState(null);
-  const [stats, setStats] = useState(emptyStats);
-  const [pages, setPages] = useState([]);
-  const [currentJob, setCurrentJob] = useState(null);
+  const [job, setJob] = useState(null);
+  const [report, setReport] = useState(emptyReport);
+  const [brokenLinks, setBrokenLinks] = useState([]);
   const [jobSearch, setJobSearch] = useState("");
 
   useEffect(() => {
-    refreshStats();
-    refreshPages();
+    setMessage("Recommended test sites: https://books.toscrape.com and https://quotes.toscrape.com");
   }, []);
 
-  const currentJobAverage = useMemo(() => {
-    if (!currentJob?.pages?.length) return 0;
-    const total = currentJob.pages.reduce((sum, page) => sum + page.response_time_ms, 0);
-    return total / currentJob.pages.length;
-  }, [currentJob]);
+  const pages = job?.pages || [];
+  const seoIssuePages = useMemo(
+    () => pages.filter((page) => page.missing_title || page.missing_description || page.missing_h1),
+    [pages],
+  );
+  const slowPages = useMemo(() => pages.filter((page) => page.is_slow), [pages]);
 
   async function request(path, options) {
     const response = await fetch(`${API_URL}${path}`, {
@@ -46,53 +56,29 @@ function App() {
       ...options,
     });
     const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      throw new Error(data.detail || "The API request failed.");
-    }
-
+    if (!response.ok) throw new Error(data.detail || "The API request failed.");
     return data;
-  }
-
-  async function refreshStats() {
-    try {
-      setStats(await request("/stats"));
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function refreshPages(jobId = "") {
-    try {
-      const params = new URLSearchParams({ limit: "100", offset: "0" });
-      if (jobId) params.set("job_id", jobId);
-      setPages(await request(`/pages?${params.toString()}`));
-    } catch (err) {
-      setError(err.message);
-    }
   }
 
   async function loadJob(jobId) {
     if (!jobId) return;
-
-    try {
-      setError("");
-      const job = await request(`/crawl/${jobId}`);
-      setCurrentJob(job);
-      setJobSearch(job.job_id);
-      setPages(job.pages);
-      setActiveView("job");
-    } catch (err) {
-      setError(err.message);
-    }
+    setError("");
+    const [jobData, reportData, brokenData] = await Promise.all([
+      request(`/crawl/${jobId}`),
+      request(`/crawl/${jobId}/report`),
+      request(`/crawl/${jobId}/broken-links`),
+    ]);
+    setJob(jobData);
+    setReport(reportData);
+    setBrokenLinks(brokenData);
+    setJobSearch(jobId);
   }
 
   async function startCrawl(event) {
     event.preventDefault();
     setLoading(true);
     setError("");
-    setMessage("Crawl in progress. This can take a moment on larger sites.");
-
+    setMessage("Running audit. Some websites may block crawlers or require JavaScript rendering.");
     try {
       const result = await request("/crawl", {
         method: "POST",
@@ -100,13 +86,13 @@ function App() {
           seed_url: seedUrl,
           max_depth: Number(maxDepth),
           max_concurrency: Number(maxConcurrency),
+          max_pages: Number(maxPages),
         }),
       });
-
       setSummary(result);
-      setMessage(result.message);
       await loadJob(result.job_id);
-      await refreshStats();
+      setActiveTab("overview");
+      setMessage(result.message);
     } catch (err) {
       setError(err.message);
       setMessage("");
@@ -115,175 +101,198 @@ function App() {
     }
   }
 
-  const tableRows = activeView === "job" && currentJob ? currentJob.pages : pages;
+  function exportCsv() {
+    if (!job?.job_id) return;
+    window.open(`${API_URL}/crawl/${job.job_id}/export/csv`, "_blank", "noopener,noreferrer");
+  }
 
   return (
     <main className="shell">
-      <header className="topbar">
+      <header className="hero">
         <div>
-          <p className="eyebrow">FastAPI + React</p>
-          <h1>Concurrent Web Crawler</h1>
+          <p className="eyebrow">Website Intelligence & Audit Platform</p>
+          <h1>WebScope</h1>
+          <p className="hero-copy">Audit crawlability, broken links, SEO metadata, and response times from one focused dashboard.</p>
         </div>
-        <nav className="nav">
-          <button className={activeView === "dashboard" ? "active" : ""} onClick={() => setActiveView("dashboard")}>
-            Dashboard
-          </button>
-          <button className={activeView === "job" ? "active" : ""} onClick={() => setActiveView("job")}>
-            Job Details
-          </button>
-          <button className={activeView === "stats" ? "active" : ""} onClick={() => setActiveView("stats")}>
-            Stats
-          </button>
-        </nav>
+        <div className="score-card">
+          <span>Health Score</span>
+          <strong>{report.health_score}%</strong>
+          <p>{job ? "Latest crawl report" : "Run a crawl to score a site"}</p>
+        </div>
       </header>
 
       {error && <div className="alert error">{error}</div>}
       {message && <div className="alert info">{message}</div>}
 
-      {activeView === "dashboard" && (
-        <>
-          <section className="panel">
-            <form className="crawl-form" onSubmit={startCrawl}>
-              <label>
-                Seed URL
-                <input value={seedUrl} onChange={(event) => setSeedUrl(event.target.value)} placeholder="https://example.com" />
-              </label>
-              <label>
-                Max depth
-                <input type="number" min="0" max="3" value={maxDepth} onChange={(event) => setMaxDepth(event.target.value)} />
-              </label>
-              <label>
-                Max concurrency
-                <input type="number" min="1" max="20" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} />
-              </label>
-              <button className="primary" disabled={loading}>
-                {loading ? "Crawling..." : "Start Crawl"}
-              </button>
-            </form>
-          </section>
+      <section className="panel">
+        <form className="crawl-form" onSubmit={startCrawl}>
+          <label>Seed URL<input value={seedUrl} onChange={(event) => setSeedUrl(event.target.value)} /></label>
+          <label>Max depth<input type="number" min="0" max="3" value={maxDepth} onChange={(event) => setMaxDepth(event.target.value)} /></label>
+          <label>Concurrency<input type="number" min="1" max="20" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} /></label>
+          <label>Max pages<input type="number" min="1" max="200" value={maxPages} onChange={(event) => setMaxPages(event.target.value)} /></label>
+          <button className="primary" disabled={loading}>{loading ? "Auditing..." : "Start Audit"}</button>
+        </form>
+        <p className="crawler-note">Some websites may block crawlers due to robots.txt, anti-bot rules, rate limits, or JavaScript-heavy pages.</p>
+      </section>
 
-          <SummaryCards
-            crawled={summary?.crawled_pages ?? stats.total_pages_crawled}
-            links={summary?.total_links_found ?? stats.total_links_found}
-            failed={summary?.failed_requests ?? stats.failed_requests}
-            average={currentJob ? currentJobAverage : stats.average_response_time_ms}
-          />
+      <SummaryCards summary={summary} report={report} />
 
-          <PagesTable pages={tableRows} title="Recent Crawled Pages" />
-        </>
-      )}
+      <section className="toolbar panel">
+        <label>Load job ID<input value={jobSearch} onChange={(event) => setJobSearch(event.target.value)} placeholder="Paste an existing crawl job ID" /></label>
+        <button onClick={() => loadJob(jobSearch)}>Load Report</button>
+        <button className="primary" disabled={!job} onClick={exportCsv}>Export CSV</button>
+      </section>
 
-      {activeView === "job" && (
-        <>
-          <section className="panel job-search">
-            <label>
-              Crawl job ID
-              <input value={jobSearch} onChange={(event) => setJobSearch(event.target.value)} placeholder="Paste a job ID" />
-            </label>
-            <button className="primary" onClick={() => loadJob(jobSearch)}>
-              Load Job
-            </button>
-          </section>
+      <nav className="tabs">
+        {["overview", "pages", "broken links", "seo issues", "performance"].map((tab) => (
+          <button key={tab} className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>{tab}</button>
+        ))}
+      </nav>
 
-          {currentJob && (
-            <section className="job-meta">
-              <div><span>Seed</span>{currentJob.seed_url}</div>
-              <div><span>Depth</span>{currentJob.max_depth}</div>
-              <div><span>Concurrency</span>{currentJob.max_concurrency}</div>
-              <div><span>Pages</span>{currentJob.pages.length}</div>
-            </section>
-          )}
-
-          <PagesTable pages={tableRows} title="Job Page Details" />
-        </>
-      )}
-
-      {activeView === "stats" && (
-        <>
-          <SummaryCards
-            crawled={stats.total_pages_crawled}
-            links={stats.total_links_found}
-            failed={stats.failed_requests}
-            average={stats.average_response_time_ms}
-          />
-          <section className="panel">
-            <div className="section-header">
-              <h2>API Stats</h2>
-              <button onClick={refreshStats}>Refresh</button>
-            </div>
-            <p className="muted">Stats are calculated from all stored crawl results in SQLite.</p>
-          </section>
-        </>
-      )}
+      {activeTab === "overview" && <Overview report={report} job={job} />}
+      {activeTab === "pages" && <PagesTable pages={pages} title="Crawled Pages" />}
+      {activeTab === "broken links" && <BrokenLinksTable links={brokenLinks} />}
+      {activeTab === "seo issues" && <SeoIssuesTable pages={seoIssuePages} />}
+      {activeTab === "performance" && <Performance report={report} pages={slowPages} />}
     </main>
   );
 }
 
-function SummaryCards({ crawled, links, failed, average }) {
+function SummaryCards({ summary, report }) {
   return (
     <section className="cards">
-      <Metric label="Pages crawled" value={crawled} />
-      <Metric label="Links found" value={links} />
-      <Metric label="Failed requests" value={failed} />
-      <Metric label="Avg response" value={formatMs(average)} />
+      <Metric label="Pages crawled" value={summary?.crawled_pages ?? report.total_pages} />
+      <Metric label="Broken links" value={report.broken_links_count} tone="bad" />
+      <Metric label="Slow pages" value={report.slow_pages_count} tone="warn" />
+      <Metric label="SEO issues" value={report.seo_issues_count} tone="warn" />
+      <Metric label="Total links" value={summary?.total_links_found ?? report.total_links} />
+      <Metric label="Avg response" value={formatMs(report.average_response_time_ms)} />
     </section>
   );
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, tone = "" }) {
+  return <article className={`metric ${tone}`}><span>{label}</span><strong>{value}</strong></article>;
+}
+
+function Overview({ report, job }) {
   return (
-    <article className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </article>
+    <section className="grid-two">
+      <div className="panel">
+        <div className="section-header"><h2>Crawl Report</h2><span className="muted">{job?.job_id || "No job loaded"}</span></div>
+        <div className="report-list">
+          <ReportRow label="Total pages" value={report.total_pages} />
+          <ReportRow label="Total links" value={report.total_links} />
+          <ReportRow label="Broken links" value={report.broken_links_count} />
+          <ReportRow label="Missing titles" value={report.missing_titles_count} />
+          <ReportRow label="Missing descriptions" value={report.missing_descriptions_count} />
+          <ReportRow label="Missing H1 tags" value={report.missing_h1_count} />
+        </div>
+      </div>
+      <div className="panel">
+        <div className="section-header"><h2>Performance</h2></div>
+        <div className="report-list">
+          <ReportRow label="Average response" value={formatMs(report.average_response_time_ms)} />
+          <ReportRow label="Fastest page" value={formatMs(report.min_response_time_ms)} />
+          <ReportRow label="Slowest page" value={formatMs(report.max_response_time_ms)} />
+          <ReportRow label="Slow pages" value={report.slow_pages_count} />
+        </div>
+      </div>
+    </section>
   );
+}
+
+function ReportRow({ label, value }) {
+  return <div className="report-row"><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function PagesTable({ pages, title }) {
   return (
     <section className="panel">
-      <div className="section-header">
-        <h2>{title}</h2>
-        <span className="muted">{pages.length} rows</span>
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>URL</th>
-              <th>Title</th>
-              <th>Status</th>
-              <th>Depth</th>
-              <th>Time</th>
-              <th>Result</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pages.length === 0 ? (
-              <tr>
-                <td colSpan="6" className="empty">No crawled pages yet.</td>
-              </tr>
-            ) : (
-              pages.map((page) => (
-                <tr key={`${page.job_id}-${page.url}`}>
-                  <td className="url-cell" title={page.url}>{page.url}</td>
-                  <td>{page.title || "Untitled"}</td>
-                  <td>{page.status_code ?? "N/A"}</td>
-                  <td>{page.depth}</td>
-                  <td>{formatMs(page.response_time_ms)}</td>
-                  <td>
-                    <span className={page.success ? "pill success" : "pill failed"}>
-                      {page.success ? "Success" : page.error || "Failed"}
-                    </span>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+      <div className="section-header"><h2>{title}</h2><span className="muted">{pages.length} rows</span></div>
+      <TableShell empty="No pages have been crawled yet." columns={["URL", "Title", "Status", "Depth", "Time", "Audit"]}>
+        {pages.map((page) => (
+          <tr key={`${page.job_id}-${page.url}`}>
+            <td className="url-cell" title={page.url}>{page.url}</td>
+            <td>{page.title || "Missing title"}</td>
+            <td>{page.status_code ?? "N/A"}</td>
+            <td>{page.depth}</td>
+            <td>{formatMs(page.response_time_ms)}</td>
+            <td><StatusPill page={page} /></td>
+          </tr>
+        ))}
+      </TableShell>
     </section>
   );
+}
+
+function BrokenLinksTable({ links }) {
+  return (
+    <section className="panel">
+      <div className="section-header"><h2>Broken Links</h2><span className="muted">{links.length} issues</span></div>
+      <TableShell empty="No broken links found for the selected crawl." columns={["Broken URL", "Found on", "Status", "Error"]}>
+        {links.map((link) => (
+          <tr key={`${link.job_id}-${link.url}`}>
+            <td className="url-cell" title={link.url}>{link.url}</td>
+            <td className="url-cell" title={link.source_url || ""}>{link.source_url || "Seed URL"}</td>
+            <td>{link.status_code ?? "N/A"}</td>
+            <td>{link.error || "HTTP error"}</td>
+          </tr>
+        ))}
+      </TableShell>
+    </section>
+  );
+}
+
+function SeoIssuesTable({ pages }) {
+  return (
+    <section className="panel">
+      <div className="section-header"><h2>SEO Issues</h2><span className="muted">{pages.length} pages</span></div>
+      <TableShell empty="No title, description, or H1 issues found." columns={["URL", "Title", "Description", "H1", "Word Count"]}>
+        {pages.map((page) => (
+          <tr key={`${page.job_id}-seo-${page.url}`}>
+            <td className="url-cell" title={page.url}>{page.url}</td>
+            <td>{page.missing_title ? "Missing" : "Present"}</td>
+            <td>{page.missing_description ? "Missing" : "Present"}</td>
+            <td>{page.missing_h1 ? "Missing" : `${page.h1_tags.length} found`}</td>
+            <td>{page.word_count}</td>
+          </tr>
+        ))}
+      </TableShell>
+    </section>
+  );
+}
+
+function Performance({ report, pages }) {
+  return (
+    <>
+      <section className="cards compact">
+        <Metric label="Average response" value={formatMs(report.average_response_time_ms)} />
+        <Metric label="Min response" value={formatMs(report.min_response_time_ms)} />
+        <Metric label="Max response" value={formatMs(report.max_response_time_ms)} />
+      </section>
+      <PagesTable pages={pages.length ? pages : report.top_10_slowest_pages} title="Slowest Pages" />
+    </>
+  );
+}
+
+function TableShell({ columns, empty, children }) {
+  const rows = React.Children.toArray(children);
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+        <tbody>{rows.length === 0 ? <tr><td className="empty" colSpan={columns.length}>{empty}</td></tr> : rows}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function StatusPill({ page }) {
+  if (!page.success) return <span className="pill failed">{page.error || "Failed"}</span>;
+  if (page.is_slow) return <span className="pill warn">Slow</span>;
+  if (page.missing_title || page.missing_description || page.missing_h1) return <span className="pill warn">SEO issue</span>;
+  return <span className="pill success">Healthy</span>;
 }
 
 createRoot(document.getElementById("root")).render(<App />);
