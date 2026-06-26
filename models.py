@@ -92,3 +92,25 @@ class CrawlReportResponse(BaseModel):
     max_response_time_ms: float
     health_score: int
     top_10_slowest_pages: list[PageRecord]
+
+
+class SiteGraphNode(BaseModel):
+    id: str
+    url: str
+    title: str
+    depth: int
+    status_code: int | None
+    success: bool
+    is_slow: bool
+    has_seo_issue: bool
+
+
+class SiteGraphEdge(BaseModel):
+    source: str
+    target: str
+
+
+class SiteGraphResponse(BaseModel):
+    job_id: str
+    nodes: list[SiteGraphNode]
+    edges: list[SiteGraphEdge]

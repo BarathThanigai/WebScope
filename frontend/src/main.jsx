@@ -1,5 +1,7 @@
 ﻿import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import ReactFlow, { Background, Controls, MiniMap } from "reactflow";
+import "reactflow/dist/style.css";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
@@ -37,6 +39,8 @@ function App() {
   const [job, setJob] = useState(null);
   const [report, setReport] = useState(emptyReport);
   const [brokenLinks, setBrokenLinks] = useState([]);
+  const [graph, setGraph] = useState({ nodes: [], edges: [] });
+  const [selectedNode, setSelectedNode] = useState(null);
   const [jobSearch, setJobSearch] = useState("");
 
   useEffect(() => {
@@ -49,6 +53,16 @@ function App() {
     [pages],
   );
   const slowPages = useMemo(() => pages.filter((page) => page.is_slow), [pages]);
+  const topIssues = useMemo(
+    () => [
+      { label: "Broken links", value: report.broken_links_count },
+      { label: "Slow pages", value: report.slow_pages_count },
+      { label: "Missing titles", value: report.missing_titles_count },
+      { label: "Missing descriptions", value: report.missing_descriptions_count },
+      { label: "Missing H1 tags", value: report.missing_h1_count },
+    ].filter((issue) => issue.value > 0),
+    [report],
+  );
 
   async function request(path, options) {
     const response = await fetch(`${API_URL}${path}`, {
@@ -63,14 +77,17 @@ function App() {
   async function loadJob(jobId) {
     if (!jobId) return;
     setError("");
-    const [jobData, reportData, brokenData] = await Promise.all([
+    const [jobData, reportData, brokenData, graphData] = await Promise.all([
       request(`/crawl/${jobId}`),
       request(`/crawl/${jobId}/report`),
       request(`/crawl/${jobId}/broken-links`),
+      request(`/crawl/${jobId}/graph`),
     ]);
     setJob(jobData);
     setReport(reportData);
     setBrokenLinks(brokenData);
+    setGraph(graphData);
+    setSelectedNode(null);
     setJobSearch(jobId);
   }
 
@@ -144,16 +161,19 @@ function App() {
       </section>
 
       <nav className="tabs">
-        {["overview", "pages", "broken links", "seo issues", "performance"].map((tab) => (
+        {["overview", "pages", "broken links", "seo issues", "performance", "site graph"].map((tab) => (
           <button key={tab} className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>{tab}</button>
         ))}
       </nav>
 
-      {activeTab === "overview" && <Overview report={report} job={job} />}
+      {activeTab === "overview" && <Overview report={report} job={job} topIssues={topIssues} />}
       {activeTab === "pages" && <PagesTable pages={pages} title="Crawled Pages" />}
       {activeTab === "broken links" && <BrokenLinksTable links={brokenLinks} />}
       {activeTab === "seo issues" && <SeoIssuesTable pages={seoIssuePages} />}
       {activeTab === "performance" && <Performance report={report} pages={slowPages} />}
+      {activeTab === "site graph" && (
+        <SiteGraph graph={graph} selectedNode={selectedNode} setSelectedNode={setSelectedNode} />
+      )}
     </main>
   );
 }
@@ -175,9 +195,9 @@ function Metric({ label, value, tone = "" }) {
   return <article className={`metric ${tone}`}><span>{label}</span><strong>{value}</strong></article>;
 }
 
-function Overview({ report, job }) {
+function Overview({ report, job, topIssues }) {
   return (
-    <section className="grid-two">
+    <section className="overview-grid">
       <div className="panel">
         <div className="section-header"><h2>Crawl Report</h2><span className="muted">{job?.job_id || "No job loaded"}</span></div>
         <div className="report-list">
@@ -189,6 +209,20 @@ function Overview({ report, job }) {
           <ReportRow label="Missing H1 tags" value={report.missing_h1_count} />
         </div>
       </div>
+      <div className="panel health-explain">
+        <div className="section-header"><h2>Health Score</h2><strong>{report.health_score}%</strong></div>
+        <p>
+          WebScope scores each crawl by subtracting broken links, slow pages, and missing SEO metadata
+          from the ideal site health baseline.
+        </p>
+        <div className="issue-chips">
+          {topIssues.length === 0 ? (
+            <span className="chip good">No major issues found</span>
+          ) : topIssues.map((issue) => (
+            <span className="chip" key={issue.label}>{issue.label}: {issue.value}</span>
+          ))}
+        </div>
+      </div>
       <div className="panel">
         <div className="section-header"><h2>Performance</h2></div>
         <div className="report-list">
@@ -196,6 +230,19 @@ function Overview({ report, job }) {
           <ReportRow label="Fastest page" value={formatMs(report.min_response_time_ms)} />
           <ReportRow label="Slowest page" value={formatMs(report.max_response_time_ms)} />
           <ReportRow label="Slow pages" value={report.slow_pages_count} />
+        </div>
+      </div>
+      <div className="panel">
+        <div className="section-header"><h2>Slowest Pages</h2></div>
+        <div className="mini-list">
+          {report.top_10_slowest_pages.length === 0 ? (
+            <p className="muted">Run a crawl to see slow pages.</p>
+          ) : report.top_10_slowest_pages.slice(0, 5).map((page) => (
+            <div className="mini-row" key={page.url}>
+              <span title={page.url}>{page.title || page.url}</span>
+              <strong>{formatMs(page.response_time_ms)}</strong>
+            </div>
+          ))}
         </div>
       </div>
     </section>
@@ -274,6 +321,90 @@ function Performance({ report, pages }) {
       <PagesTable pages={pages.length ? pages : report.top_10_slowest_pages} title="Slowest Pages" />
     </>
   );
+}
+
+function SiteGraph({ graph, selectedNode, setSelectedNode }) {
+  const flowNodes = useMemo(() => {
+    const depthCounts = new Map();
+    return graph.nodes.map((node) => {
+      const siblingIndex = depthCounts.get(node.depth) || 0;
+      depthCounts.set(node.depth, siblingIndex + 1);
+      return {
+        id: node.id,
+        position: { x: node.depth * 280, y: siblingIndex * 120 },
+        data: { label: node.title || safePath(node.url), page: node },
+        className: graphNodeClass(node),
+      };
+    });
+  }, [graph.nodes]);
+
+  const flowEdges = useMemo(
+    () => graph.edges.map((edge, index) => ({ id: `edge-${index}`, ...edge })),
+    [graph.edges],
+  );
+
+  return (
+    <section className="graph-layout">
+      <div className="panel graph-panel">
+        <div className="section-header">
+          <h2>Site Graph</h2>
+          <span className="muted">{graph.nodes.length} nodes, {graph.edges.length} edges</span>
+        </div>
+        <div className="graph-canvas">
+          {graph.nodes.length === 0 ? (
+            <div className="graph-empty">Run or load a crawl to visualize internal links.</div>
+          ) : (
+            <ReactFlow
+              nodes={flowNodes}
+              edges={flowEdges}
+              fitView
+              onNodeClick={(_, node) => setSelectedNode(node.data.page)}
+            >
+              <MiniMap pannable zoomable />
+              <Controls />
+              <Background gap={18} />
+            </ReactFlow>
+          )}
+        </div>
+        <div className="legend">
+          <span><i className="legend-dot normal"></i>Normal</span>
+          <span><i className="legend-dot slow"></i>Slow</span>
+          <span><i className="legend-dot seo"></i>SEO issue</span>
+          <span><i className="legend-dot failed"></i>Failed</span>
+        </div>
+      </div>
+      <div className="panel node-detail">
+        <div className="section-header"><h2>Page Details</h2></div>
+        {selectedNode ? (
+          <div className="report-list">
+            <ReportRow label="URL" value={selectedNode.url} />
+            <ReportRow label="Title" value={selectedNode.title || "Missing title"} />
+            <ReportRow label="Depth" value={selectedNode.depth} />
+            <ReportRow label="Status" value={selectedNode.status_code ?? "N/A"} />
+            <ReportRow label="Slow" value={selectedNode.is_slow ? "Yes" : "No"} />
+            <ReportRow label="SEO Issue" value={selectedNode.has_seo_issue ? "Yes" : "No"} />
+          </div>
+        ) : (
+          <p className="muted">Click a graph node to inspect the crawled page.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function graphNodeClass(node) {
+  if (!node.success) return "graph-node failed-node";
+  if (node.is_slow) return "graph-node slow-node";
+  if (node.has_seo_issue) return "graph-node seo-node";
+  return "graph-node normal-node";
+}
+
+function safePath(url) {
+  try {
+    return new URL(url).pathname || url;
+  } catch {
+    return url;
+  }
 }
 
 function TableShell({ columns, empty, children }) {

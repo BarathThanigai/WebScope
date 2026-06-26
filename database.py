@@ -9,6 +9,9 @@ from models import (
     CrawlJobResponse,
     CrawlReportResponse,
     PageRecord,
+    SiteGraphEdge,
+    SiteGraphNode,
+    SiteGraphResponse,
     StatsResponse,
 )
 
@@ -255,6 +258,44 @@ class Database:
                 pages, key=lambda page: page.response_time_ms, reverse=True
             )[:10],
         )
+
+    def get_site_graph(self, job_id: str) -> SiteGraphResponse | None:
+        if self.get_crawl_job(job_id) is None:
+            return None
+
+        pages = self.get_pages(job_id)
+        url_to_id = {page.url: f"page-{index}" for index, page in enumerate(pages)}
+        nodes = [
+            SiteGraphNode(
+                id=url_to_id[page.url],
+                url=page.url,
+                title=page.title,
+                depth=page.depth,
+                status_code=page.status_code,
+                success=page.success,
+                is_slow=page.is_slow,
+                has_seo_issue=page.missing_title
+                or page.missing_description
+                or page.missing_h1,
+            )
+            for page in pages
+        ]
+
+        seen_edges: set[tuple[str, str]] = set()
+        edges: list[SiteGraphEdge] = []
+        for page in pages:
+            source = url_to_id[page.url]
+            for link in page.links:
+                target = url_to_id.get(link)
+                if target is None or target == source:
+                    continue
+                edge_key = (source, target)
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
+                edges.append(SiteGraphEdge(source=source, target=target))
+
+        return SiteGraphResponse(job_id=job_id, nodes=nodes, edges=edges)
 
     def get_stats(self) -> StatsResponse:
         pages = self.get_pages()

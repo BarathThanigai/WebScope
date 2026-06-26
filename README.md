@@ -1,6 +1,6 @@
 ﻿# WebScope
 
-WebScope is a full-stack Website Intelligence & Audit Platform for practical SEO checks, website health checks, broken link detection, performance analysis, and crawl reporting.
+WebScope v1.1 is a full-stack Website Intelligence & Audit Platform for practical SEO checks, website health checks, broken link detection, performance analysis, site graph visualization, and crawl reporting.
 
 It started as a concurrent web crawler and now includes a FastAPI audit backend, SQLite persistence, and a React + Vite dashboard suitable for a portfolio or internship resume project.
 
@@ -25,8 +25,9 @@ It started as a concurrent web crawler and now includes a FastAPI audit backend,
   - slow page flag for pages over 1000 ms
   - average, min, and max response time per crawl job
 - Crawl report endpoint with health score and top 10 slowest pages
+- Interactive site graph endpoint and React Flow visualization
 - CSV export per crawl job
-- React dashboard with Overview, Pages, Broken Links, SEO Issues, and Performance sections
+- React dashboard with Overview, Pages, Broken Links, SEO Issues, Performance, and Site Graph sections
 
 ## Recommended Test Sites
 
@@ -55,6 +56,7 @@ Frontend:
 
 - React
 - Vite
+- React Flow
 - Plain CSS
 
 ## Architecture
@@ -145,6 +147,7 @@ GET /health
 POST /crawl
 GET /crawl/{job_id}
 GET /crawl/{job_id}/broken-links
+GET /crawl/{job_id}/graph
 GET /crawl/{job_id}/report
 GET /crawl/{job_id}/export/csv
 GET /pages?job_id={job_id}&limit=50&offset=0
@@ -247,3 +250,63 @@ dist
 ```
 
 5. Set `VITE_API_URL` to the deployed backend URL.
+
+## Site Graph
+
+```http
+GET /crawl/{job_id}/graph
+```
+
+Returns graph-ready crawl data with nodes and edges:
+
+```json
+{
+  "job_id": "2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7",
+  "nodes": [
+    {
+      "id": "page-0",
+      "url": "https://books.toscrape.com",
+      "title": "All products | Books to Scrape - Sandbox",
+      "depth": 0,
+      "status_code": 200,
+      "success": true,
+      "is_slow": false,
+      "has_seo_issue": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "page-0",
+      "target": "page-1"
+    }
+  ]
+}
+```
+
+The frontend uses React Flow for zoom, pan, fit view, minimap, and click-to-inspect page details. Graph nodes are styled by audit state: normal, slow, SEO issue, or failed.
+
+## Screenshots
+
+Add screenshots here after running or deploying:
+
+- WebScope overview dashboard
+- Pages table
+- Broken links tab
+- SEO issues tab
+- Performance tab
+- Site Graph tab
+- FastAPI docs
+
+## Roadmap
+
+- Live crawl progress and streaming job status
+- Dockerfile and Docker Compose for local full-stack startup
+- Persistent production database option such as Postgres
+- Scheduled recurring audits and historical report comparison
+
+## Resume Bullets
+
+- Built WebScope, a full-stack website audit platform using FastAPI, React, Vite, SQLite, asyncio, aiohttp, BeautifulSoup, and React Flow.
+- Implemented concurrent BFS crawling with robots.txt compliance, bounded crawl limits, crawl job tracking, timeout handling, CSV exports, and graph-ready crawl topology.
+- Added SEO metadata extraction, broken link detection, slow page analysis, health scoring, report endpoints, and interactive site graph visualization.
+- Designed a responsive React dashboard for audit summaries, broken links, SEO issues, performance reports, site graph exploration, and deployment-ready portfolio presentation.

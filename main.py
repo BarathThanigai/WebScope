@@ -16,6 +16,7 @@ from models import (
     CrawlRequest,
     CrawlResponse,
     PageRecord,
+    SiteGraphResponse,
     StatsResponse,
 )
 
@@ -43,6 +44,7 @@ def root() -> dict[str, str | list[str]]:
             "/crawl",
             "/crawl/{job_id}",
             "/crawl/{job_id}/broken-links",
+            "/crawl/{job_id}/graph",
             "/crawl/{job_id}/report",
             "/crawl/{job_id}/export/csv",
             "/pages",
@@ -133,6 +135,14 @@ def crawl_report(job_id: str, db: Database = Depends(get_database)) -> CrawlRepo
     if report is None:
         raise HTTPException(status_code=404, detail="Crawl job not found")
     return report
+
+
+@app.get("/crawl/{job_id}/graph", response_model=SiteGraphResponse)
+def site_graph(job_id: str, db: Database = Depends(get_database)) -> SiteGraphResponse:
+    graph = db.get_site_graph(job_id)
+    if graph is None:
+        raise HTTPException(status_code=404, detail="Crawl job not found")
+    return graph
 
 
 @app.get("/crawl/{job_id}/export/csv")
