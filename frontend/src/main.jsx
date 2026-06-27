@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import ReactFlow, { Background, Controls, MiniMap } from "reactflow";
 import "reactflow/dist/style.css";
 import LandingPage from "./components/landing/LandingPage";
+import { ThemeProvider } from "./theme/ThemeContext";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
@@ -478,4 +479,8 @@ function App() {
   return <LandingPage onLaunch={() => setShowDashboard(true)} />;
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(
+  <ThemeProvider>
+    <App />
+  </ThemeProvider>,
+);
