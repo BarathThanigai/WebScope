@@ -87,6 +87,10 @@ class Database:
         self.database_url = database_url
         self.use_sqlite_fallback = use_sqlite_fallback
         self.backend = "postgresql" if database_url else "sqlite"
+        if self.backend == "postgresql":
+            print("Connected to PostgreSQL")
+        else:
+            print("Using SQLite")
 
     def initialize(self) -> None:
         self._validate_configuration()
