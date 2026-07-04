@@ -2,7 +2,7 @@
 
 WebScope v1.1 is a full-stack Website Intelligence & Audit Platform for practical SEO checks, website health checks, link issue detection, performance analysis, site graph visualization, and crawl reporting.
 
-It started as a concurrent web crawler and now includes a FastAPI audit backend, SQLite persistence, and a React + Vite dashboard suitable for a portfolio or internship resume project.
+It started as a concurrent web crawler and now includes a FastAPI audit backend, SQLite local persistence with PostgreSQL production support, and a React + Vite dashboard suitable for a portfolio or internship resume project.
 
 ## Features
 
@@ -52,7 +52,8 @@ Backend:
 - asyncio
 - aiohttp
 - BeautifulSoup
-- SQLite
+- SQLite local fallback
+- PostgreSQL production database
 - Pydantic
 
 Frontend:
@@ -68,7 +69,7 @@ Frontend:
 .
 ├── main.py              # FastAPI routes, CORS, health checks, exports
 ├── crawler.py           # Concurrent crawler, robots.txt, SEO extraction
-├── database.py          # SQLite schema, migrations, reports, stats
+├── database.py          # SQLite/PostgreSQL persistence, migrations, reports, stats
 ├── models.py            # Pydantic request/response models
 ├── config.py            # Environment-based CORS config
 ├── requirements.txt     # Backend dependencies
@@ -92,6 +93,8 @@ pip install -r requirements.txt
 copy .env.example .env
 uvicorn main:app --reload
 ```
+
+By default, the backend uses local SQLite at `crawler.db`, so no external database is required for local development.
 
 Backend URL:
 
@@ -141,7 +144,7 @@ Services:
 - Backend API: `http://localhost:8000`
 - Backend docs: `http://localhost:8000/docs`
 
-The frontend container serves the Vite production build through Nginx and proxies `/api` requests to the backend container. The backend stores SQLite data in the `webscope-data` Docker volume.
+The frontend container serves the Vite production build through Nginx and proxies `/api` requests to the backend container. Without `DATABASE_URL`, the backend stores SQLite data in the `webscope-data` Docker volume. Set `DATABASE_URL` to use PostgreSQL instead.
 
 ## Environment Variables
 
@@ -150,6 +153,18 @@ Backend:
 ```text
 FRONTEND_URL=http://localhost:5173
 ALLOWED_ORIGINS=http://localhost:5173
+DATABASE_PATH=crawler.db
+DATABASE_URL=
+```
+
+Database behavior:
+
+- Leave `DATABASE_URL` empty for local SQLite fallback.
+- Set `DATABASE_URL` in production to use PostgreSQL.
+- Neon/Supabase-style example:
+
+```text
+DATABASE_URL=postgresql://webscope_user:strong_password@ep-example.us-east-1.aws.neon.tech/webscope?sslmode=require
 ```
 
 Frontend:
@@ -226,9 +241,10 @@ uvicorn main:app --host 0.0.0.0 --port $PORT
 ```text
 FRONTEND_URL=https://your-frontend-domain.vercel.app
 ALLOWED_ORIGINS=https://your-frontend-domain.vercel.app
+DATABASE_URL=postgresql://user:password@host:5432/webscope?sslmode=require
 ```
 
-SQLite is fine for demos and portfolio deployments. For durable production data on ephemeral hosting, move storage to Postgres or another managed database.
+For production, use a managed PostgreSQL database such as Render PostgreSQL, Neon, or Supabase. If `DATABASE_URL` is not configured, the app falls back to SQLite, which is convenient locally but not ideal for multi-instance production deployments.
 
 ### Frontend on Vercel
 

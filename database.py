@@ -1,8 +1,10 @@
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Iterable
 
 from crawler import CrawledPage
 from models import (
@@ -17,49 +19,68 @@ from models import (
 )
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", Path(__file__).with_name("crawler.db")))
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:  # PostgreSQL support is optional unless DATABASE_URL is configured.
+    psycopg2 = None
+    RealDictCursor = None
+
+
+class DatabaseSession:
+    def __init__(self, connection: Any, backend: str) -> None:
+        self.connection = connection
+        self.backend = backend
+
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> Any:
+        if self.backend == "postgresql":
+            cursor = self.connection.cursor()
+            cursor.execute(self._prepare_sql(sql), tuple(params))
+            return cursor
+        return self.connection.execute(sql, tuple(params))
+
+    def executemany(self, sql: str, params: Iterable[Iterable[Any]]) -> Any:
+        if self.backend == "postgresql":
+            cursor = self.connection.cursor()
+            cursor.executemany(self._prepare_sql(sql), list(params))
+            return cursor
+        return self.connection.executemany(sql, params)
+
+    def commit(self) -> None:
+        self.connection.commit()
+
+    def rollback(self) -> None:
+        self.connection.rollback()
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def _prepare_sql(self, sql: str) -> str:
+        if self.backend != "postgresql":
+            return sql
+        return sql.replace("?", "%s")
 
 
 class Database:
-    def __init__(self, path: Path = DATABASE_PATH) -> None:
+    def __init__(
+        self,
+        path: Path = DATABASE_PATH,
+        database_url: str | None = DATABASE_URL,
+    ) -> None:
         self.path = path
+        self.database_url = database_url
+        self.backend = "postgresql" if database_url else "sqlite"
 
     def initialize(self) -> None:
         with self._connect() as connection:
-            self._migrate_legacy_pages_table(connection)
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS jobs (
-                    job_id TEXT PRIMARY KEY,
-                    seed_url TEXT NOT NULL,
-                    max_depth INTEGER NOT NULL,
-                    max_concurrency INTEGER NOT NULL,
-                    max_pages INTEGER NOT NULL DEFAULT 50,
-                    started_at TEXT NOT NULL,
-                    completed_at TEXT
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    job_id TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    status_code INTEGER,
-                    depth INTEGER NOT NULL,
-                    links TEXT NOT NULL,
-                    response_time_ms REAL NOT NULL,
-                    success INTEGER NOT NULL,
-                    error TEXT,
-                    crawled_at TEXT NOT NULL,
-                    UNIQUE(job_id, url),
-                    FOREIGN KEY(job_id) REFERENCES jobs(job_id)
-                )
-                """
-            )
+            if self.backend == "sqlite":
+                self._migrate_legacy_pages_table(connection)
+            self._create_tables(connection)
             self._ensure_schema_columns(connection)
-            self._ensure_legacy_job(connection)
+            if self.backend == "sqlite":
+                self._ensure_legacy_job(connection)
 
     def create_job(
         self,
@@ -327,7 +348,46 @@ class Database:
             average_response_time_ms=average_response_time_ms,
         )
 
-    def _migrate_legacy_pages_table(self, connection: sqlite3.Connection) -> None:
+    def _create_tables(self, connection: DatabaseSession) -> None:
+        page_id_definition = (
+            "BIGSERIAL PRIMARY KEY"
+            if self.backend == "postgresql"
+            else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY,
+                seed_url TEXT NOT NULL,
+                max_depth INTEGER NOT NULL,
+                max_concurrency INTEGER NOT NULL,
+                max_pages INTEGER NOT NULL DEFAULT 50,
+                started_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS pages (
+                id {page_id_definition},
+                job_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                status_code INTEGER,
+                depth INTEGER NOT NULL,
+                links TEXT NOT NULL,
+                response_time_ms REAL NOT NULL,
+                success INTEGER NOT NULL,
+                error TEXT,
+                crawled_at TEXT NOT NULL,
+                UNIQUE(job_id, url),
+                FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+            )
+            """
+        )
+
+    def _migrate_legacy_pages_table(self, connection: DatabaseSession) -> None:
         table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pages'"
         ).fetchone()
@@ -372,7 +432,7 @@ class Database:
             """
         )
 
-    def _ensure_legacy_job(self, connection: sqlite3.Connection) -> None:
+    def _ensure_legacy_job(self, connection: DatabaseSession) -> None:
         legacy_page = connection.execute(
             "SELECT 1 FROM pages WHERE job_id = 'legacy' LIMIT 1"
         ).fetchone()
@@ -390,7 +450,7 @@ class Database:
             (self._utc_now(), self._utc_now()),
         )
 
-    def _ensure_schema_columns(self, connection: sqlite3.Connection) -> None:
+    def _ensure_schema_columns(self, connection: DatabaseSession) -> None:
         job_columns = self._table_columns(connection, "jobs")
         if "max_pages" not in job_columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN max_pages INTEGER NOT NULL DEFAULT 50")
@@ -413,14 +473,25 @@ class Database:
             if name not in page_columns:
                 connection.execute(f"ALTER TABLE pages ADD COLUMN {name} {definition}")
 
-    @staticmethod
-    def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
+    def _table_columns(self, connection: DatabaseSession, table_name: str) -> set[str]:
+        if self.backend == "postgresql":
+            return {
+                row["column_name"]
+                for row in connection.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = ?
+                    """,
+                    (table_name,),
+                ).fetchall()
+            }
         return {
             row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")
         }
 
     @staticmethod
-    def _row_to_page(row: sqlite3.Row) -> PageRecord:
+    def _row_to_page(row: Any) -> PageRecord:
         return PageRecord(
             job_id=row["job_id"],
             url=row["url"],
@@ -507,10 +578,30 @@ class Database:
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        return connection
+    @contextmanager
+    def _connect(self) -> Iterable[DatabaseSession]:
+        if self.backend == "postgresql":
+            if psycopg2 is None or RealDictCursor is None:
+                raise RuntimeError(
+                    "DATABASE_URL is set, but psycopg2-binary is not installed."
+                )
+            raw_connection = psycopg2.connect(
+                self.database_url,
+                cursor_factory=RealDictCursor,
+            )
+        else:
+            raw_connection = sqlite3.connect(self.path)
+            raw_connection.row_factory = sqlite3.Row
+
+        session = DatabaseSession(raw_connection, self.backend)
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
 
 database = Database()
