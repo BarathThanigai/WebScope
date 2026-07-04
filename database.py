@@ -18,8 +18,21 @@ from models import (
     StatsResponse,
 )
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
+
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", Path(__file__).with_name("crawler.db")))
 DATABASE_URL = os.getenv("DATABASE_URL")
+USE_SQLITE_FALLBACK = os.getenv("USE_SQLITE_FALLBACK", "false").lower() == "true"
+DATABASE_REQUIRED_MESSAGE = (
+    "DATABASE_URL is required. Set it for PostgreSQL or enable "
+    "USE_SQLITE_FALLBACK=true for local SQLite development."
+)
 
 try:
     import psycopg2
@@ -68,12 +81,15 @@ class Database:
         self,
         path: Path = DATABASE_PATH,
         database_url: str | None = DATABASE_URL,
+        use_sqlite_fallback: bool = USE_SQLITE_FALLBACK,
     ) -> None:
         self.path = path
         self.database_url = database_url
+        self.use_sqlite_fallback = use_sqlite_fallback
         self.backend = "postgresql" if database_url else "sqlite"
 
     def initialize(self) -> None:
+        self._validate_configuration()
         with self._connect() as connection:
             if self.backend == "sqlite":
                 self._migrate_legacy_pages_table(connection)
@@ -580,6 +596,7 @@ class Database:
 
     @contextmanager
     def _connect(self) -> Iterable[DatabaseSession]:
+        self._validate_configuration()
         if self.backend == "postgresql":
             if psycopg2 is None or RealDictCursor is None:
                 raise RuntimeError(
@@ -602,6 +619,13 @@ class Database:
             raise
         finally:
             session.close()
+
+    def _validate_configuration(self) -> None:
+        if self.database_url:
+            return
+        if self.use_sqlite_fallback:
+            return
+        raise RuntimeError(DATABASE_REQUIRED_MESSAGE)
 
 
 database = Database()

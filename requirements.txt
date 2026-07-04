@@ -4,3 +4,4 @@ aiohttp
 beautifulsoup4
 pydantic
 psycopg2-binary
+python-dotenv

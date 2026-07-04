@@ -2,7 +2,7 @@
 
 WebScope v1.1 is a full-stack Website Intelligence & Audit Platform for practical SEO checks, website health checks, link issue detection, performance analysis, site graph visualization, and crawl reporting.
 
-It started as a concurrent web crawler and now includes a FastAPI audit backend, SQLite local persistence with PostgreSQL production support, and a React + Vite dashboard suitable for a portfolio or internship resume project.
+It started as a concurrent web crawler and now includes a FastAPI audit backend, PostgreSQL persistence, optional SQLite local fallback, and a React + Vite dashboard suitable for a portfolio or internship resume project.
 
 ## Features
 
@@ -52,8 +52,8 @@ Backend:
 - asyncio
 - aiohttp
 - BeautifulSoup
-- SQLite local fallback
-- PostgreSQL production database
+- PostgreSQL primary database
+- Optional SQLite local fallback
 - Pydantic
 
 Frontend:
@@ -94,7 +94,7 @@ copy .env.example .env
 uvicorn main:app --reload
 ```
 
-By default, the backend uses local SQLite at `crawler.db`, so no external database is required for local development.
+PostgreSQL is the primary database. Set `DATABASE_URL` in `.env` before starting the backend. For local-only development without PostgreSQL, set `USE_SQLITE_FALLBACK=true` to use SQLite at `crawler.db`.
 
 Backend URL:
 
@@ -144,7 +144,7 @@ Services:
 - Backend API: `http://localhost:8000`
 - Backend docs: `http://localhost:8000/docs`
 
-The frontend container serves the Vite production build through Nginx and proxies `/api` requests to the backend container. Without `DATABASE_URL`, the backend stores SQLite data in the `webscope-data` Docker volume. Set `DATABASE_URL` to use PostgreSQL instead.
+The frontend container serves the Vite production build through Nginx and proxies `/api` requests to the backend container. Set `DATABASE_URL` for PostgreSQL. SQLite is available only when `USE_SQLITE_FALLBACK=true`.
 
 ## Environment Variables
 
@@ -154,18 +154,27 @@ Backend:
 FRONTEND_URL=http://localhost:5173
 ALLOWED_ORIGINS=http://localhost:5173
 DATABASE_PATH=crawler.db
-DATABASE_URL=
+DATABASE_URL=postgresql://user:password@host:5432/webscope?sslmode=require
+USE_SQLITE_FALLBACK=false
 ```
 
 Database behavior:
 
-- Leave `DATABASE_URL` empty for local SQLite fallback.
-- Set `DATABASE_URL` in production to use PostgreSQL.
-- Neon/Supabase-style example:
+- `DATABASE_URL` is required by default.
+- Set `DATABASE_URL` to a PostgreSQL database for local or production use.
+- For local SQLite development only, set `USE_SQLITE_FALLBACK=true`.
+- Neon/Supabase-style PostgreSQL example:
 
 ```text
 DATABASE_URL=postgresql://webscope_user:strong_password@ep-example.us-east-1.aws.neon.tech/webscope?sslmode=require
 ```
+
+Neon/Supabase setup:
+
+1. Create a PostgreSQL project/database.
+2. Copy the pooled or direct connection string.
+3. Add `?sslmode=require` if your provider requires SSL and it is not already included.
+4. Set the value as `DATABASE_URL` in `.env` locally or in your deployment provider.
 
 Frontend:
 
@@ -242,9 +251,10 @@ uvicorn main:app --host 0.0.0.0 --port $PORT
 FRONTEND_URL=https://your-frontend-domain.vercel.app
 ALLOWED_ORIGINS=https://your-frontend-domain.vercel.app
 DATABASE_URL=postgresql://user:password@host:5432/webscope?sslmode=require
+USE_SQLITE_FALLBACK=false
 ```
 
-For production, use a managed PostgreSQL database such as Render PostgreSQL, Neon, or Supabase. If `DATABASE_URL` is not configured, the app falls back to SQLite, which is convenient locally but not ideal for multi-instance production deployments.
+For production, use a managed PostgreSQL database such as Render PostgreSQL, Neon, or Supabase. If `DATABASE_URL` is missing and `USE_SQLITE_FALLBACK` is not `true`, the backend raises a clear startup error instead of silently using local storage.
 
 ### Frontend on Vercel
 
