@@ -38,6 +38,7 @@ const emptyProgress = {
   failed_requests: 0,
   current_depth: 0,
   current_url: "",
+  max_pages: 0,
   started_at: "",
   completed_at: null,
   error_message: null,
@@ -132,11 +133,18 @@ function DashboardApp({ onHome }) {
     setGraph(graphData);
     setSelectedNode(null);
     setJobSearch(jobId);
+    setProgress((current) => ({
+      ...current,
+      max_pages: jobData.max_pages,
+    }));
   }
 
   async function loadStatus(jobId) {
     const status = await request(`/crawl/${jobId}/status`);
-    setProgress(status);
+    setProgress((current) => ({
+      ...current,
+      ...status,
+    }));
     setJobSearch(jobId);
     return status;
   }
@@ -199,7 +207,10 @@ function DashboardApp({ onHome }) {
 
       source.onmessage = async (event) => {
         const status = JSON.parse(event.data);
-        setProgress(status);
+        setProgress((current) => ({
+          ...current,
+          ...status,
+        }));
         if (terminalStatuses.has(status.status)) {
           await handleTerminalStatus(status);
         }
@@ -244,6 +255,7 @@ function DashboardApp({ onHome }) {
         ...current,
         job_id: result.job_id,
         status: result.status,
+        max_pages: Number(maxPages),
       }));
       setJobSearch(result.job_id);
       setActiveTab("overview");
@@ -264,6 +276,12 @@ function DashboardApp({ onHome }) {
   async function loadExistingJob(jobId) {
     closeProgressStream();
     const status = await loadStatus(jobId);
+    const jobData = await request(`/crawl/${jobId}`);
+    setJob(jobData);
+    setProgress((current) => ({
+      ...current,
+      max_pages: jobData.max_pages,
+    }));
     if (terminalStatuses.has(status.status)) {
       setLoading(false);
       await loadJob(jobId);
@@ -360,8 +378,12 @@ function SummaryCards({ summary, report }) {
 function ProgressPanel({ progress, loading }) {
   const discovered = Number(progress.pages_discovered || 0);
   const crawled = Number(progress.pages_crawled || 0);
-  const percent = discovered > 0 ? Math.min(100, Math.round((crawled / discovered) * 100)) : 0;
+  const crawlLimit = Number(progress.max_pages || 0);
+  const denominator = Math.min(Math.max(discovered, 1), crawlLimit || Math.max(discovered, 1));
+  const rawPercent = denominator > 0 ? Math.round((crawled / denominator) * 100) : 0;
+  const percent = progress.status === "completed" ? 100 : Math.max(0, Math.min(100, rawPercent));
   const isActive = loading || ["queued", "running"].includes(progress.status);
+  const reachedPageLimit = progress.status === "completed" && crawlLimit > 0 && crawled >= crawlLimit && discovered > crawlLimit;
 
   return (
     <section className={`panel progress-panel ${isActive ? "active" : ""}`}>
@@ -376,10 +398,17 @@ function ProgressPanel({ progress, loading }) {
       <div className="progress-track" aria-label="Crawl progress">
         <span style={{ width: `${percent}%` }}></span>
       </div>
+      <div className="progress-meta">
+        <span>{percent}% complete</span>
+        {reachedPageLimit && (
+          <strong>Completed after reaching the configured {crawlLimit}-page limit.</strong>
+        )}
+      </div>
 
       <div className="progress-grid">
         <ReportRow label="Pages crawled" value={progress.pages_crawled} />
-        <ReportRow label="Pages discovered" value={progress.pages_discovered} />
+        <ReportRow label="URLs discovered" value={progress.pages_discovered} />
+        <ReportRow label="Crawl page limit" value={crawlLimit || "Not set"} />
         <ReportRow label="Successful requests" value={progress.successful_requests} />
         <ReportRow label="Failed requests" value={progress.failed_requests} />
         <ReportRow label="Current depth" value={progress.current_depth} />
