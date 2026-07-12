@@ -55,6 +55,7 @@ Backend:
 - BeautifulSoup
 - PostgreSQL primary database
 - Optional SQLite local fallback
+- Redis + RQ worker scaffold for future queue-backed crawls
 - Pydantic
 
 Frontend:
@@ -73,6 +74,10 @@ Frontend:
 ├── database.py          # SQLite/PostgreSQL persistence, migrations, reports, stats
 ├── models.py            # Pydantic request/response models
 ├── config.py            # Environment-based CORS config
+├── services/
+│   ├── queue.py         # Redis connection and RQ crawls queue
+│   └── crawl_tasks.py   # Crawl task execution logic
+├── worker.py            # RQ worker entrypoint
 ├── requirements.txt     # Backend dependencies
 ├── .env.example         # Backend env sample
 └── frontend/
@@ -108,6 +113,42 @@ API docs:
 ```text
 http://127.0.0.1:8000/docs
 ```
+
+## Redis and RQ Worker Setup
+
+WebScope is prepared for Redis Queue workers, but the API still uses FastAPI background tasks in the current version. No crawl jobs are enqueued yet.
+
+Install Redis locally:
+
+- Windows: use Docker, WSL, or Memurai-compatible Redis.
+- macOS: `brew install redis`
+- Ubuntu/WSL: `sudo apt install redis-server`
+
+Run Redis locally with Docker:
+
+```bash
+docker run --name webscope-redis -p 6379:6379 redis:7
+```
+
+Or start an installed Redis service:
+
+```bash
+redis-server
+```
+
+Set the Redis URL in `.env`:
+
+```text
+REDIS_URL=redis://localhost:6379
+```
+
+Start the prepared worker in a separate terminal:
+
+```powershell
+python worker.py
+```
+
+The worker listens on the `crawls` queue. It is scaffolded for the next phase and does not change current crawl behavior.
 
 ## Local Frontend Setup
 
@@ -157,6 +198,7 @@ ALLOWED_ORIGINS=http://localhost:5173
 DATABASE_PATH=crawler.db
 DATABASE_URL=postgresql://user:password@host:5432/webscope?sslmode=require
 USE_SQLITE_FALLBACK=false
+REDIS_URL=redis://localhost:6379
 ```
 
 Database behavior:
