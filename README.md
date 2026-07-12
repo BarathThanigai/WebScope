@@ -10,7 +10,7 @@ It started as a concurrent web crawler and now includes a FastAPI audit backend,
 - `robots.txt` checking before page fetches
 - WebScopeBot User-Agent, polite crawl delay, retry/backoff for temporary failures, and sitemap.xml discovery
 - Failure reason classification for robots blocks, timeouts, connection errors, rate limits, and HTTP errors
-- Crawl jobs with persistent IDs
+- Asynchronous crawl jobs with persistent IDs and status tracking
 - Safety limits: `max_depth <= 3`, `max_concurrency <= 20`, `max_pages <= 200`
 - Timeout handling and friendly blocked-site messages
 - Link issue classification for true broken links, crawler-inaccessible URLs, server errors, rate limits, and redirect issues
@@ -189,6 +189,7 @@ GET /
 GET /health
 POST /crawl
 GET /crawl/{job_id}
+GET /crawl/{job_id}/status
 GET /crawl/{job_id}/broken-links
 GET /crawl/{job_id}/graph
 GET /crawl/{job_id}/report
@@ -216,15 +217,36 @@ Sample response:
 ```json
 {
   "job_id": "2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7",
-  "crawled_pages": 50,
-  "total_links_found": 420,
-  "failed_requests": 0,
-  "slow_pages": 2,
-  "seo_issues": 8,
-  "health_score": 92,
-  "message": "Crawl completed. Full results are available at /crawl/2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7."
+  "status": "queued",
+  "message": "Crawl job created."
 }
 ```
+
+The crawl continues in the background. Poll job status while it runs:
+
+```http
+GET /crawl/{job_id}/status
+```
+
+Sample status response:
+
+```json
+{
+  "job_id": "2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7",
+  "status": "running",
+  "pages_crawled": 12,
+  "pages_discovered": 43,
+  "successful_requests": 11,
+  "failed_requests": 1,
+  "current_depth": 1,
+  "current_url": "https://books.toscrape.com/catalogue/page-2.html",
+  "started_at": "2026-07-12T10:00:00+00:00",
+  "completed_at": null,
+  "error_message": null
+}
+```
+
+Valid job states are `queued`, `running`, `completed`, `failed`, and `cancelled`. Reports, page results, graph data, and CSV export remain available through their existing endpoints after a crawl has produced data.
 
 ## Deployment
 
@@ -332,7 +354,7 @@ The frontend uses React Flow for zoom, pan, fit view, minimap, and click-to-insp
 
 ## Roadmap
 
-- Live crawl progress and streaming job status
-- Dockerfile and Docker Compose for local full-stack startup
-- Persistent production database option such as Postgres
+- WebSocket-based live crawl progress
+- Docker image hardening and deployment templates
+- Crawl cancellation endpoint
 - Scheduled recurring audits and historical report comparison

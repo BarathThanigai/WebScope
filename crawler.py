@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable
 from urllib.parse import urldefrag, urljoin, urlparse
 
 import aiohttp
@@ -48,6 +48,7 @@ class ConcurrentCrawler:
         timeout_seconds: int = 15,
         crawl_delay_seconds: float = 0.5,
         max_retries: int = 2,
+        progress_callback: Callable[[dict], Awaitable[None] | None] | None = None,
     ) -> None:
         self.job_id = job_id
         self.seed_url = self._normalize_url(seed_url)
@@ -59,6 +60,7 @@ class ConcurrentCrawler:
         self.user_agent = "WebScopeBot/1.1 (+https://github.com/webscope-audit)"
         self.crawl_delay_seconds = crawl_delay_seconds
         self.max_retries = max_retries
+        self.progress_callback = progress_callback
         self._request_lock = asyncio.Lock()
         self._last_request_at = 0.0
 
@@ -79,6 +81,14 @@ class ConcurrentCrawler:
                 if sitemap_url not in seen:
                     seen.add(sitemap_url)
                     queue.append((sitemap_url, 0, None))
+            await self._emit_progress(
+                pages_crawled=0,
+                pages_discovered=len(seen),
+                successful_requests=0,
+                failed_requests=0,
+                current_depth=0,
+                current_url=self.seed_url,
+            )
 
             while queue and len(results) < self.max_pages:
                 current_depth = queue[0][1]
@@ -91,6 +101,16 @@ class ConcurrentCrawler:
                     and len(results) + len(batch) < self.max_pages
                 ):
                     batch.append(queue.popleft())
+
+                if batch:
+                    await self._emit_progress(
+                        pages_crawled=len(results),
+                        pages_discovered=len(seen),
+                        successful_requests=sum(1 for page in results if page.success),
+                        failed_requests=sum(1 for page in results if not page.success),
+                        current_depth=current_depth,
+                        current_url=batch[0][0],
+                    )
 
                 pages = await asyncio.gather(
                     *(
@@ -109,7 +129,24 @@ class ConcurrentCrawler:
                             seen.add(link)
                             queue.append((link, page.depth + 1, page.url))
 
+                await self._emit_progress(
+                    pages_crawled=len(results),
+                    pages_discovered=len(seen),
+                    successful_requests=sum(1 for page in results if page.success),
+                    failed_requests=sum(1 for page in results if not page.success),
+                    current_depth=current_depth,
+                    current_url=pages[-1].url if pages else None,
+                )
+
         return results
+
+    async def _emit_progress(self, **progress: object) -> None:
+        if self.progress_callback is None:
+            return
+
+        result = self.progress_callback(progress)
+        if result is not None:
+            await result
 
     async def _fetch_page(
         self,

@@ -1,8 +1,9 @@
 import csv
+import asyncio
 from io import StringIO
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -15,6 +16,7 @@ from models import (
     CrawlReportResponse,
     CrawlRequest,
     CrawlResponse,
+    CrawlStatusResponse,
     PageRecord,
     SiteGraphResponse,
     StatsResponse,
@@ -43,6 +45,7 @@ def root() -> dict[str, str | list[str]]:
             "/docs",
             "/crawl",
             "/crawl/{job_id}",
+            "/crawl/{job_id}/status",
             "/crawl/{job_id}/broken-links",
             "/crawl/{job_id}/graph",
             "/crawl/{job_id}/report",
@@ -60,7 +63,11 @@ def health() -> dict[str, str]:
 
 
 @app.post("/crawl", response_model=CrawlResponse)
-async def crawl(request: CrawlRequest, db: Database = Depends(get_database)) -> CrawlResponse:
+async def crawl(
+    request: CrawlRequest,
+    background_tasks: BackgroundTasks,
+    db: Database = Depends(get_database),
+) -> CrawlResponse:
     job_id = str(uuid4())
 
     try:
@@ -71,47 +78,72 @@ async def crawl(request: CrawlRequest, db: Database = Depends(get_database)) -> 
             request.max_concurrency,
             request.max_pages,
         )
-        crawler = ConcurrentCrawler(
-            job_id=job_id,
-            seed_url=str(request.seed_url),
-            max_depth=request.max_depth,
-            max_concurrency=request.max_concurrency,
-            max_pages=request.max_pages,
-        )
-        pages = await crawler.crawl()
     except ValueError as exc:
-        db.complete_job(job_id)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        db.complete_job(job_id)
-        raise HTTPException(status_code=500, detail="Crawler failed unexpectedly") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    db.save_pages(pages)
-    db.complete_job(job_id)
-    report = db.get_report(job_id)
-    if report is None:
-        raise HTTPException(status_code=500, detail="Crawl report could not be generated")
-
-    if not pages:
-        message = "Crawl completed, but no pages were reachable. The site may block crawlers."
-    elif all(not page.success for page in pages):
-        message = (
-            "Crawl completed with failed requests. The site may be blocked by robots.txt, "
-            "anti-bot rules, timeouts, or JavaScript-only rendering."
-        )
-    else:
-        message = f"Crawl completed. Full results are available at /crawl/{job_id}."
+    background_tasks.add_task(
+        run_crawl_job,
+        job_id,
+        str(request.seed_url),
+        request.max_depth,
+        request.max_concurrency,
+        request.max_pages,
+        db,
+    )
 
     return CrawlResponse(
         job_id=job_id,
-        crawled_pages=len(pages),
-        total_links_found=sum(len(page.links) for page in pages),
-        failed_requests=sum(1 for page in pages if not page.success),
-        slow_pages=report.slow_pages_count,
-        seo_issues=report.seo_issues_count,
-        health_score=report.health_score,
-        message=message,
+        status="queued",
+        message="Crawl job created.",
     )
+
+
+async def run_crawl_job(
+    job_id: str,
+    seed_url: str,
+    max_depth: int,
+    max_concurrency: int,
+    max_pages: int,
+    db: Database,
+) -> None:
+    try:
+        db.start_job(job_id)
+
+        async def update_progress(progress: dict) -> None:
+            await asyncio.to_thread(db.update_job_progress, job_id, **progress)
+
+        crawler = ConcurrentCrawler(
+            job_id=job_id,
+            seed_url=seed_url,
+            max_depth=max_depth,
+            max_concurrency=max_concurrency,
+            max_pages=max_pages,
+            progress_callback=update_progress,
+        )
+        pages = await crawler.crawl()
+        await asyncio.to_thread(db.save_pages, pages)
+        current_status = await asyncio.to_thread(db.get_job_status, job_id)
+        await asyncio.to_thread(
+            db.update_job_progress,
+            job_id,
+            pages_crawled=len(pages),
+            pages_discovered=(
+                current_status.pages_discovered
+                if current_status is not None
+                else len(pages)
+            ),
+            successful_requests=sum(1 for page in pages if page.success),
+            failed_requests=sum(1 for page in pages if not page.success),
+            current_depth=max((page.depth for page in pages), default=0),
+            current_url=None,
+        )
+        await asyncio.to_thread(db.complete_job, job_id)
+    except ValueError as exc:
+        await asyncio.to_thread(db.fail_job, job_id, str(exc))
+    except Exception:
+        await asyncio.to_thread(db.fail_job, job_id, "Crawler failed unexpectedly")
 
 
 @app.get("/crawl/{job_id}", response_model=CrawlJobResponse)
@@ -120,6 +152,14 @@ def crawl_job(job_id: str, db: Database = Depends(get_database)) -> CrawlJobResp
     if job is None:
         raise HTTPException(status_code=404, detail="Crawl job not found")
     return job
+
+
+@app.get("/crawl/{job_id}/status", response_model=CrawlStatusResponse)
+def crawl_status(job_id: str, db: Database = Depends(get_database)) -> CrawlStatusResponse:
+    status = db.get_job_status(job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Crawl job not found")
+    return status
 
 
 @app.get("/crawl/{job_id}/broken-links", response_model=list[BrokenLinkRecord])

@@ -11,6 +11,7 @@ from models import (
     BrokenLinkRecord,
     CrawlJobResponse,
     CrawlReportResponse,
+    CrawlStatusResponse,
     PageRecord,
     SiteGraphEdge,
     SiteGraphNode,
@@ -87,10 +88,6 @@ class Database:
         self.database_url = database_url
         self.use_sqlite_fallback = use_sqlite_fallback
         self.backend = "postgresql" if database_url else "sqlite"
-        if self.backend == "postgresql":
-            print("Connected to PostgreSQL")
-        else:
-            print("Using SQLite")
 
     def initialize(self) -> None:
         self._validate_configuration()
@@ -114,18 +111,89 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, seed_url, max_depth, max_concurrency, max_pages, started_at
+                    job_id, seed_url, max_depth, max_concurrency, max_pages,
+                    status, pages_crawled, pages_discovered, successful_requests,
+                    failed_requests, current_depth, current_url, started_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0, 0, ?, ?)
                 """,
-                (job_id, seed_url, max_depth, max_concurrency, max_pages, self._utc_now()),
+                (
+                    job_id,
+                    seed_url,
+                    max_depth,
+                    max_concurrency,
+                    max_pages,
+                    "queued",
+                    seed_url,
+                    self._utc_now(),
+                ),
+            )
+
+    def start_job(self, job_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, error_message = NULL
+                WHERE job_id = ?
+                """,
+                ("running", job_id),
+            )
+
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        pages_crawled: int,
+        pages_discovered: int,
+        successful_requests: int,
+        failed_requests: int,
+        current_depth: int,
+        current_url: str | None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET pages_crawled = ?,
+                    pages_discovered = ?,
+                    successful_requests = ?,
+                    failed_requests = ?,
+                    current_depth = ?,
+                    current_url = ?
+                WHERE job_id = ?
+                """,
+                (
+                    pages_crawled,
+                    pages_discovered,
+                    successful_requests,
+                    failed_requests,
+                    current_depth,
+                    current_url,
+                    job_id,
+                ),
             )
 
     def complete_job(self, job_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE jobs SET completed_at = ? WHERE job_id = ?",
-                (self._utc_now(), job_id),
+                """
+                UPDATE jobs
+                SET status = ?, completed_at = ?, current_url = NULL
+                WHERE job_id = ?
+                """,
+                ("completed", self._utc_now(), job_id),
+            )
+
+    def fail_job(self, job_id: str, error_message: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, completed_at = ?, error_message = ?, current_url = NULL
+                WHERE job_id = ?
+                """,
+                ("failed", self._utc_now(), error_message[:500], job_id),
             )
 
     def save_pages(self, pages: list[CrawledPage]) -> None:
@@ -249,6 +317,36 @@ class Database:
             started_at=row["started_at"],
             completed_at=row["completed_at"],
             pages=self.get_pages(job_id),
+        )
+
+    def get_job_status(self, job_id: str) -> CrawlStatusResponse | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT job_id, status, pages_crawled, pages_discovered,
+                       successful_requests, failed_requests, current_depth,
+                       current_url, started_at, completed_at, error_message
+                FROM jobs
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return CrawlStatusResponse(
+            job_id=row["job_id"],
+            status=row["status"],
+            pages_crawled=row["pages_crawled"],
+            pages_discovered=row["pages_discovered"],
+            successful_requests=row["successful_requests"],
+            failed_requests=row["failed_requests"],
+            current_depth=row["current_depth"],
+            current_url=row["current_url"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            error_message=row["error_message"],
         )
 
     def get_broken_links(self, job_id: str) -> list[BrokenLinkRecord]:
@@ -382,8 +480,16 @@ class Database:
                 max_depth INTEGER NOT NULL,
                 max_concurrency INTEGER NOT NULL,
                 max_pages INTEGER NOT NULL DEFAULT 50,
+                status TEXT NOT NULL DEFAULT 'completed',
+                pages_crawled INTEGER NOT NULL DEFAULT 0,
+                pages_discovered INTEGER NOT NULL DEFAULT 0,
+                successful_requests INTEGER NOT NULL DEFAULT 0,
+                failed_requests INTEGER NOT NULL DEFAULT 0,
+                current_depth INTEGER NOT NULL DEFAULT 0,
+                current_url TEXT,
                 started_at TEXT NOT NULL,
-                completed_at TEXT
+                completed_at TEXT,
+                error_message TEXT
             )
             """
         )
@@ -472,8 +578,20 @@ class Database:
 
     def _ensure_schema_columns(self, connection: DatabaseSession) -> None:
         job_columns = self._table_columns(connection, "jobs")
-        if "max_pages" not in job_columns:
-            connection.execute("ALTER TABLE jobs ADD COLUMN max_pages INTEGER NOT NULL DEFAULT 50")
+        job_column_definitions = {
+            "max_pages": "INTEGER NOT NULL DEFAULT 50",
+            "status": "TEXT NOT NULL DEFAULT 'completed'",
+            "pages_crawled": "INTEGER NOT NULL DEFAULT 0",
+            "pages_discovered": "INTEGER NOT NULL DEFAULT 0",
+            "successful_requests": "INTEGER NOT NULL DEFAULT 0",
+            "failed_requests": "INTEGER NOT NULL DEFAULT 0",
+            "current_depth": "INTEGER NOT NULL DEFAULT 0",
+            "current_url": "TEXT",
+            "error_message": "TEXT",
+        }
+        for name, definition in job_column_definitions.items():
+            if name not in job_columns:
+                connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
 
         page_columns = self._table_columns(connection, "pages")
         columns = {
