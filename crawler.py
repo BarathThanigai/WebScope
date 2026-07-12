@@ -49,6 +49,7 @@ class ConcurrentCrawler:
         crawl_delay_seconds: float = 0.5,
         max_retries: int = 2,
         progress_callback: Callable[[dict], Awaitable[None] | None] | None = None,
+        should_cancel: Callable[[], Awaitable[bool] | bool] | None = None,
     ) -> None:
         self.job_id = job_id
         self.seed_url = self._normalize_url(seed_url)
@@ -61,6 +62,8 @@ class ConcurrentCrawler:
         self.crawl_delay_seconds = crawl_delay_seconds
         self.max_retries = max_retries
         self.progress_callback = progress_callback
+        self.should_cancel = should_cancel
+        self.completion_reason = "queue_exhausted"
         self._request_lock = asyncio.Lock()
         self._last_request_at = 0.0
 
@@ -72,25 +75,58 @@ class ConcurrentCrawler:
         seen = {self.seed_url}
         results: list[CrawledPage] = []
         semaphore = asyncio.Semaphore(self.max_concurrency)
+        crawl_started_at = time.perf_counter()
 
         headers = {"User-Agent": self.user_agent}
         async with aiohttp.ClientSession(timeout=self.timeout, headers=headers) as session:
+            await self._emit_progress(
+                phase="checking_robots",
+                pages_crawled=0,
+                pages_discovered=len(seen),
+                successful_requests=0,
+                failed_requests=0,
+                queued_urls=len(queue),
+                active_workers=0,
+                pages_per_second=0,
+                current_depth=0,
+                current_url=self.seed_url,
+            )
             robots = await self._load_robots_parser(session)
             self.crawl_delay_seconds = robots.crawl_delay(self.user_agent) or self.crawl_delay_seconds
+            await self._emit_progress(
+                phase="discovering_sitemap",
+                pages_crawled=0,
+                pages_discovered=len(seen),
+                successful_requests=0,
+                failed_requests=0,
+                queued_urls=len(queue),
+                active_workers=0,
+                pages_per_second=0,
+                current_depth=0,
+                current_url=self.seed_url,
+            )
             for sitemap_url in await self._discover_sitemap_urls(session, robots):
                 if sitemap_url not in seen:
                     seen.add(sitemap_url)
                     queue.append((sitemap_url, 0, None))
             await self._emit_progress(
+                phase="crawling",
                 pages_crawled=0,
                 pages_discovered=len(seen),
                 successful_requests=0,
                 failed_requests=0,
+                queued_urls=len(queue),
+                active_workers=0,
+                pages_per_second=0,
                 current_depth=0,
                 current_url=self.seed_url,
             )
 
             while queue and len(results) < self.max_pages:
+                if await self._should_cancel():
+                    self.completion_reason = "cancelled_by_user"
+                    break
+
                 current_depth = queue[0][1]
                 batch: list[tuple[str, int, str | None]] = []
 
@@ -104,10 +140,14 @@ class ConcurrentCrawler:
 
                 if batch:
                     await self._emit_progress(
+                        phase="crawling",
                         pages_crawled=len(results),
                         pages_discovered=len(seen),
                         successful_requests=sum(1 for page in results if page.success),
                         failed_requests=sum(1 for page in results if not page.success),
+                        queued_urls=len(queue),
+                        active_workers=min(len(batch), self.max_concurrency),
+                        pages_per_second=self._pages_per_second(len(results), crawl_started_at),
                         current_depth=current_depth,
                         current_url=batch[0][0],
                     )
@@ -120,23 +160,41 @@ class ConcurrentCrawler:
                 )
                 results.extend(pages)
 
-                for page in pages:
-                    if not page.success or page.depth >= self.max_depth:
-                        continue
+                if await self._should_cancel():
+                    self.completion_reason = "cancelled_by_user"
+                else:
+                    for page in pages:
+                        if not page.success or page.depth >= self.max_depth:
+                            continue
 
-                    for link in page.links:
-                        if link not in seen:
-                            seen.add(link)
-                            queue.append((link, page.depth + 1, page.url))
+                        for link in page.links:
+                            if link not in seen:
+                                seen.add(link)
+                                queue.append((link, page.depth + 1, page.url))
 
                 await self._emit_progress(
+                    phase="crawling",
                     pages_crawled=len(results),
                     pages_discovered=len(seen),
                     successful_requests=sum(1 for page in results if page.success),
                     failed_requests=sum(1 for page in results if not page.success),
+                    queued_urls=len(queue),
+                    active_workers=0,
+                    pages_per_second=self._pages_per_second(len(results), crawl_started_at),
                     current_depth=current_depth,
                     current_url=pages[-1].url if pages else None,
                 )
+
+                if self.completion_reason == "cancelled_by_user":
+                    break
+
+        if self.completion_reason != "cancelled_by_user":
+            if len(results) >= self.max_pages:
+                self.completion_reason = "page_limit_reached"
+            elif results and max(page.depth for page in results) >= self.max_depth:
+                self.completion_reason = "max_depth_reached"
+            else:
+                self.completion_reason = "queue_exhausted"
 
         return results
 
@@ -147,6 +205,19 @@ class ConcurrentCrawler:
         result = self.progress_callback(progress)
         if result is not None:
             await result
+
+    async def _should_cancel(self) -> bool:
+        if self.should_cancel is None:
+            return False
+
+        result = self.should_cancel()
+        if result is not None and hasattr(result, "__await__"):
+            return bool(await result)
+        return bool(result)
+
+    def _pages_per_second(self, pages_crawled: int, started_at: float) -> float:
+        elapsed = max(time.perf_counter() - started_at, 0.001)
+        return round(pages_crawled / elapsed, 2)
 
     async def _fetch_page(
         self,

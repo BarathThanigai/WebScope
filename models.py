@@ -41,14 +41,19 @@ class CrawlResponse(BaseModel):
 class CrawlStatusResponse(BaseModel):
     job_id: str
     status: str
+    phase: str
     pages_crawled: int
     pages_discovered: int
     successful_requests: int
     failed_requests: int
+    queued_urls: int
+    active_workers: int
+    pages_per_second: float
     current_depth: int
     current_url: str | None = None
     started_at: str
     completed_at: str | None = None
+    completion_reason: str | None = None
     error_message: str | None = None
 
 

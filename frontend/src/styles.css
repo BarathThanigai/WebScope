@@ -1016,6 +1016,25 @@ input:focus { outline: 3px solid var(--accent-soft); border-color: var(--accent)
   border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
 }
 
+.monitor-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.danger-button {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--border));
+  color: var(--danger);
+  font-weight: 900;
+}
+
+.danger-button:hover {
+  background: color-mix(in srgb, var(--danger) 18%, var(--surface));
+}
+
 .status-badge {
   background: var(--surface-elevated);
   border: 1px solid var(--border);
@@ -1102,6 +1121,57 @@ input:focus { outline: 3px solid var(--accent-soft); border-color: var(--accent)
 }
 
 .current-url strong {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-feed {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.section-header.compact {
+  margin-bottom: 0;
+}
+
+.section-header.compact h3 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.activity-feed ul {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.activity-feed li {
+  align-items: center;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 86px minmax(0, 1fr) auto;
+  padding: 10px;
+}
+
+.activity-feed li span,
+.activity-feed li small {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.activity-feed li strong {
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1318,5 +1388,6 @@ th { color: var(--text-secondary); font-size: 0.8rem; text-transform: uppercase;
   .footer-meta { align-items: flex-start; flex-direction: column; }
   .cards, .cards.compact { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
+  .activity-feed li { grid-template-columns: 1fr; }
   .tabs button { flex: 1; }
 }
