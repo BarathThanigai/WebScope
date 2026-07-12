@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ReactFlow, { Background, Controls, MiniMap } from "reactflow";
 import "reactflow/dist/style.css";
@@ -29,8 +29,35 @@ const emptyReport = {
   top_10_slowest_pages: [],
 };
 
+const emptyProgress = {
+  job_id: "",
+  status: "idle",
+  pages_crawled: 0,
+  pages_discovered: 0,
+  successful_requests: 0,
+  failed_requests: 0,
+  current_depth: 0,
+  current_url: "",
+  started_at: "",
+  completed_at: null,
+  error_message: null,
+};
+
+const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
+
 function formatMs(value) {
   return `${Number(value || 0).toFixed(1)} ms`;
+}
+
+function formatElapsed(startedAt, completedAt) {
+  if (!startedAt) return "0s";
+  const start = new Date(startedAt).getTime();
+  const end = completedAt ? new Date(completedAt).getTime() : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end)) return "0s";
+  const totalSeconds = Math.max(0, Math.floor((end - start) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 function DashboardApp({ onHome }) {
@@ -50,10 +77,15 @@ function DashboardApp({ onHome }) {
   const [graph, setGraph] = useState({ nodes: [], edges: [] });
   const [selectedNode, setSelectedNode] = useState(null);
   const [jobSearch, setJobSearch] = useState("");
+  const [progress, setProgress] = useState(emptyProgress);
+  const eventSourceRef = useRef(null);
+  const pollingRef = useRef(null);
 
   useEffect(() => {
     setMessage("Recommended test sites: https://books.toscrape.com and https://quotes.toscrape.com");
   }, []);
+
+  useEffect(() => () => closeProgressStream(), []);
 
   const pages = job?.pages || [];
   const seoIssuePages = useMemo(
@@ -102,11 +134,101 @@ function DashboardApp({ onHome }) {
     setJobSearch(jobId);
   }
 
+  async function loadStatus(jobId) {
+    const status = await request(`/crawl/${jobId}/status`);
+    setProgress(status);
+    setJobSearch(jobId);
+    return status;
+  }
+
+  function closeProgressStream() {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  }
+
+  async function handleTerminalStatus(status) {
+    closeProgressStream();
+    setLoading(false);
+
+    if (status.status === "completed") {
+      await loadJob(status.job_id);
+      setActiveTab("overview");
+      setMessage("Crawl completed. Full results are loaded.");
+      return;
+    }
+
+    if (status.status === "failed") {
+      setError(status.error_message || "Crawl failed.");
+      setMessage("");
+      return;
+    }
+
+    if (status.status === "cancelled") {
+      setMessage("Crawl was cancelled.");
+    }
+  }
+
+  function startPolling(jobId) {
+    closeProgressStream();
+    pollingRef.current = window.setInterval(async () => {
+      try {
+        const status = await loadStatus(jobId);
+        if (terminalStatuses.has(status.status)) {
+          await handleTerminalStatus(status);
+        }
+      } catch (err) {
+        setError(err.message);
+        setLoading(false);
+        closeProgressStream();
+      }
+    }, 2000);
+  }
+
+  function startProgressStream(jobId) {
+    closeProgressStream();
+
+    try {
+      const source = new EventSource(`${API_URL}/crawl/${jobId}/events`);
+      eventSourceRef.current = source;
+
+      source.onmessage = async (event) => {
+        const status = JSON.parse(event.data);
+        setProgress(status);
+        if (terminalStatuses.has(status.status)) {
+          await handleTerminalStatus(status);
+        }
+      };
+
+      source.onerror = () => {
+        if (!eventSourceRef.current) return;
+        source.close();
+        eventSourceRef.current = null;
+        setMessage("Live updates are using polling fallback.");
+        startPolling(jobId);
+      };
+    } catch {
+      startPolling(jobId);
+    }
+  }
+
   async function startCrawl(event) {
     event.preventDefault();
+    closeProgressStream();
     setLoading(true);
     setError("");
-    setMessage("Running audit. WebScope audits publicly crawlable pages only and respects robots.txt.");
+    setJob(null);
+    setReport(emptyReport);
+    setLinkIssues([]);
+    setGraph({ nodes: [], edges: [] });
+    setSelectedNode(null);
+    setProgress(emptyProgress);
+    setMessage("Creating crawl job. WebScope audits publicly crawlable pages only and respects robots.txt.");
     try {
       const result = await request("/crawl", {
         method: "POST",
@@ -118,13 +240,18 @@ function DashboardApp({ onHome }) {
         }),
       });
       setSummary(result);
-      await loadJob(result.job_id);
+      setProgress((current) => ({
+        ...current,
+        job_id: result.job_id,
+        status: result.status,
+      }));
+      setJobSearch(result.job_id);
       setActiveTab("overview");
       setMessage(result.message);
+      startProgressStream(result.job_id);
     } catch (err) {
       setError(err.message);
       setMessage("");
-    } finally {
       setLoading(false);
     }
   }
@@ -132,6 +259,19 @@ function DashboardApp({ onHome }) {
   function exportCsv() {
     if (!job?.job_id) return;
     window.open(`${API_URL}/crawl/${job.job_id}/export/csv`, "_blank", "noopener,noreferrer");
+  }
+
+  async function loadExistingJob(jobId) {
+    closeProgressStream();
+    const status = await loadStatus(jobId);
+    if (terminalStatuses.has(status.status)) {
+      setLoading(false);
+      await loadJob(jobId);
+      return;
+    }
+    setLoading(true);
+    setMessage("Loaded active crawl. Live updates are connected.");
+    startProgressStream(jobId);
   }
 
   return (
@@ -174,11 +314,13 @@ function DashboardApp({ onHome }) {
         <p className="crawler-note">WebScope audits publicly crawlable pages only. Some websites may block crawlers due to robots.txt, anti-bot rules, rate limits, or JavaScript-heavy pages.</p>
       </section>
 
+      <ProgressPanel progress={progress} loading={loading} />
+
       <SummaryCards summary={summary} report={report} />
 
       <section className="toolbar panel">
         <label>Load job ID<input value={jobSearch} onChange={(event) => setJobSearch(event.target.value)} placeholder="Paste an existing crawl job ID" /></label>
-        <button onClick={() => loadJob(jobSearch)}>Load Report</button>
+        <button onClick={() => loadExistingJob(jobSearch)}>Load Report</button>
         <button className="primary" disabled={!job} onClick={exportCsv}>Export CSV</button>
       </section>
 
@@ -211,6 +353,43 @@ function SummaryCards({ summary, report }) {
       <Metric label="Timeouts" value={report.timeout_count} tone="bad" />
       <Metric label="SEO issues" value={report.seo_issues_count} tone="warn" />
       <Metric label="Avg response" value={formatMs(report.average_response_time_ms)} />
+    </section>
+  );
+}
+
+function ProgressPanel({ progress, loading }) {
+  const discovered = Number(progress.pages_discovered || 0);
+  const crawled = Number(progress.pages_crawled || 0);
+  const percent = discovered > 0 ? Math.min(100, Math.round((crawled / discovered) * 100)) : 0;
+  const isActive = loading || ["queued", "running"].includes(progress.status);
+
+  return (
+    <section className={`panel progress-panel ${isActive ? "active" : ""}`}>
+      <div className="section-header">
+        <div>
+          <h2>Live Crawl Progress</h2>
+          <span className="muted">{progress.job_id || "No active crawl"}</span>
+        </div>
+        <span className={`status-badge ${progress.status}`}>{progress.status}</span>
+      </div>
+
+      <div className="progress-track" aria-label="Crawl progress">
+        <span style={{ width: `${percent}%` }}></span>
+      </div>
+
+      <div className="progress-grid">
+        <ReportRow label="Pages crawled" value={progress.pages_crawled} />
+        <ReportRow label="Pages discovered" value={progress.pages_discovered} />
+        <ReportRow label="Successful requests" value={progress.successful_requests} />
+        <ReportRow label="Failed requests" value={progress.failed_requests} />
+        <ReportRow label="Current depth" value={progress.current_depth} />
+        <ReportRow label="Elapsed time" value={formatElapsed(progress.started_at, progress.completed_at)} />
+      </div>
+
+      <div className="current-url">
+        <span>Current URL</span>
+        <strong title={progress.current_url || ""}>{progress.current_url || "Waiting for crawl activity"}</strong>
+      </div>
     </section>
   );
 }

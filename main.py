@@ -1,9 +1,10 @@
 import csv
 import asyncio
+import json
 from io import StringIO
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -46,6 +47,7 @@ def root() -> dict[str, str | list[str]]:
             "/crawl",
             "/crawl/{job_id}",
             "/crawl/{job_id}/status",
+            "/crawl/{job_id}/events",
             "/crawl/{job_id}/broken-links",
             "/crawl/{job_id}/graph",
             "/crawl/{job_id}/report",
@@ -160,6 +162,49 @@ def crawl_status(job_id: str, db: Database = Depends(get_database)) -> CrawlStat
     if status is None:
         raise HTTPException(status_code=404, detail="Crawl job not found")
     return status
+
+
+@app.get("/crawl/{job_id}/events")
+async def crawl_events(
+    job_id: str,
+    request: Request,
+    db: Database = Depends(get_database),
+) -> StreamingResponse:
+    initial_status = db.get_job_status(job_id)
+    if initial_status is None:
+        raise HTTPException(status_code=404, detail="Crawl job not found")
+
+    async def event_stream():
+        terminal_statuses = {"completed", "failed", "cancelled"}
+        while True:
+            if await request.is_disconnected():
+                break
+
+            try:
+                status = await asyncio.to_thread(db.get_job_status, job_id)
+            except Exception:
+                break
+
+            if status is None:
+                break
+
+            payload = status.model_dump() if hasattr(status, "model_dump") else status.dict()
+            yield f"data: {json.dumps(payload)}\n\n"
+
+            if status.status in terminal_statuses:
+                break
+
+            await asyncio.sleep(0.75)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/crawl/{job_id}/broken-links", response_model=list[BrokenLinkRecord])

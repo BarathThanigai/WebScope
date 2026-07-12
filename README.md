@@ -190,6 +190,7 @@ GET /health
 POST /crawl
 GET /crawl/{job_id}
 GET /crawl/{job_id}/status
+GET /crawl/{job_id}/events
 GET /crawl/{job_id}/broken-links
 GET /crawl/{job_id}/graph
 GET /crawl/{job_id}/report
@@ -222,7 +223,20 @@ Sample response:
 }
 ```
 
-The crawl continues in the background. Poll job status while it runs:
+The crawl continues in the background. Subscribe to live progress with Server-Sent Events:
+
+```http
+GET /crawl/{job_id}/events
+Accept: text/event-stream
+```
+
+Each SSE message contains the same JSON shape as the status endpoint:
+
+```text
+data: {"job_id":"...","status":"running","pages_crawled":12,"pages_discovered":43,"successful_requests":11,"failed_requests":1,"current_depth":1,"current_url":"https://books.toscrape.com/catalogue/page-2.html","started_at":"2026-07-12T10:00:00+00:00","completed_at":null,"error_message":null}
+```
+
+The stream sends updates about every 750 ms and closes automatically when the job reaches `completed`, `failed`, or `cancelled`. Clients can fall back to polling:
 
 ```http
 GET /crawl/{job_id}/status
