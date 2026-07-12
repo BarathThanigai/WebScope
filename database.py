@@ -11,6 +11,7 @@ from models import (
     BrokenLinkRecord,
     CrawlJobResponse,
     CrawlReportResponse,
+    CrawlStatusResponse,
     PageRecord,
     SiteGraphEdge,
     SiteGraphNode,
@@ -87,10 +88,6 @@ class Database:
         self.database_url = database_url
         self.use_sqlite_fallback = use_sqlite_fallback
         self.backend = "postgresql" if database_url else "sqlite"
-        if self.backend == "postgresql":
-            print("Connected to PostgreSQL")
-        else:
-            print("Using SQLite")
 
     def initialize(self) -> None:
         self._validate_configuration()
@@ -114,19 +111,132 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, seed_url, max_depth, max_concurrency, max_pages, started_at
+                    job_id, seed_url, max_depth, max_concurrency, max_pages,
+                    status, pages_crawled, pages_discovered, successful_requests,
+                    failed_requests, phase, queued_urls, active_workers,
+                    pages_per_second, current_depth, current_url, started_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0, ?, 1, 0, 0, 0, ?, ?)
                 """,
-                (job_id, seed_url, max_depth, max_concurrency, max_pages, self._utc_now()),
+                (
+                    job_id,
+                    seed_url,
+                    max_depth,
+                    max_concurrency,
+                    max_pages,
+                    "queued",
+                    "queued",
+                    seed_url,
+                    self._utc_now(),
+                ),
             )
 
-    def complete_job(self, job_id: str) -> None:
+    def start_job(self, job_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE jobs SET completed_at = ? WHERE job_id = ?",
-                (self._utc_now(), job_id),
+                """
+                UPDATE jobs
+                SET status = ?, phase = ?, error_message = NULL
+                WHERE job_id = ?
+                """,
+                ("running", "checking_robots", job_id),
             )
+
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        pages_crawled: int | None = None,
+        pages_discovered: int | None = None,
+        successful_requests: int | None = None,
+        failed_requests: int | None = None,
+        current_depth: int | None = None,
+        current_url: str | None = None,
+        phase: str | None = None,
+        queued_urls: int | None = None,
+        active_workers: int | None = None,
+        pages_per_second: float | None = None,
+        completion_reason: str | None = None,
+    ) -> None:
+        updates = {
+            "pages_crawled": pages_crawled,
+            "pages_discovered": pages_discovered,
+            "successful_requests": successful_requests,
+            "failed_requests": failed_requests,
+            "current_depth": current_depth,
+            "current_url": current_url,
+            "phase": phase,
+            "queued_urls": queued_urls,
+            "active_workers": active_workers,
+            "pages_per_second": pages_per_second,
+            "completion_reason": completion_reason,
+        }
+        assignments = [f"{name} = ?" for name, value in updates.items() if value is not None]
+        values = [value for value in updates.values() if value is not None]
+        if not assignments:
+            return
+
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE jobs SET {', '.join(assignments)} WHERE job_id = ?",
+                (*values, job_id),
+            )
+
+    def complete_job(self, job_id: str, completion_reason: str = "queue_exhausted") -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, phase = ?, completed_at = ?, current_url = NULL,
+                    active_workers = 0, completion_reason = ?
+                WHERE job_id = ?
+                """,
+                ("completed", "completed", self._utc_now(), completion_reason, job_id),
+            )
+
+    def fail_job(self, job_id: str, error_message: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, phase = ?, completed_at = ?, error_message = ?,
+                    current_url = NULL, active_workers = 0, completion_reason = ?
+                WHERE job_id = ?
+                """,
+                ("failed", "failed", self._utc_now(), error_message[:500], "failed", job_id),
+            )
+
+    def request_job_cancel(self, job_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET cancel_requested = 1, phase = ?, completion_reason = ?
+                WHERE job_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
+                """,
+                ("cancelled", "cancelled_by_user", job_id),
+            )
+            return cursor.rowcount > 0
+
+    def cancel_job(self, job_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, phase = ?, completed_at = ?, current_url = NULL,
+                    active_workers = 0, completion_reason = ?
+                WHERE job_id = ?
+                """,
+                ("cancelled", "cancelled", self._utc_now(), "cancelled_by_user", job_id),
+            )
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT cancel_requested, status FROM jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return bool(row and (row["cancel_requested"] or row["status"] == "cancelled"))
 
     def save_pages(self, pages: list[CrawledPage]) -> None:
         if not pages:
@@ -249,6 +359,43 @@ class Database:
             started_at=row["started_at"],
             completed_at=row["completed_at"],
             pages=self.get_pages(job_id),
+        )
+
+    def get_job_status(self, job_id: str) -> CrawlStatusResponse | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT job_id, status, pages_crawled, pages_discovered,
+                       successful_requests, failed_requests, phase, queued_urls,
+                       active_workers, pages_per_second, current_depth,
+                       current_url, started_at, completed_at, completion_reason,
+                       error_message
+                FROM jobs
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return CrawlStatusResponse(
+            job_id=row["job_id"],
+            status=row["status"],
+            phase=row["phase"],
+            pages_crawled=row["pages_crawled"],
+            pages_discovered=row["pages_discovered"],
+            successful_requests=row["successful_requests"],
+            failed_requests=row["failed_requests"],
+            queued_urls=row["queued_urls"],
+            active_workers=row["active_workers"],
+            pages_per_second=row["pages_per_second"],
+            current_depth=row["current_depth"],
+            current_url=row["current_url"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            completion_reason=row["completion_reason"],
+            error_message=row["error_message"],
         )
 
     def get_broken_links(self, job_id: str) -> list[BrokenLinkRecord]:
@@ -382,8 +529,22 @@ class Database:
                 max_depth INTEGER NOT NULL,
                 max_concurrency INTEGER NOT NULL,
                 max_pages INTEGER NOT NULL DEFAULT 50,
+                status TEXT NOT NULL DEFAULT 'completed',
+                pages_crawled INTEGER NOT NULL DEFAULT 0,
+                pages_discovered INTEGER NOT NULL DEFAULT 0,
+                successful_requests INTEGER NOT NULL DEFAULT 0,
+                failed_requests INTEGER NOT NULL DEFAULT 0,
+                phase TEXT NOT NULL DEFAULT 'completed',
+                queued_urls INTEGER NOT NULL DEFAULT 0,
+                active_workers INTEGER NOT NULL DEFAULT 0,
+                pages_per_second REAL NOT NULL DEFAULT 0,
+                current_depth INTEGER NOT NULL DEFAULT 0,
+                current_url TEXT,
                 started_at TEXT NOT NULL,
-                completed_at TEXT
+                completed_at TEXT,
+                completion_reason TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT
             )
             """
         )
@@ -472,8 +633,26 @@ class Database:
 
     def _ensure_schema_columns(self, connection: DatabaseSession) -> None:
         job_columns = self._table_columns(connection, "jobs")
-        if "max_pages" not in job_columns:
-            connection.execute("ALTER TABLE jobs ADD COLUMN max_pages INTEGER NOT NULL DEFAULT 50")
+        job_column_definitions = {
+            "max_pages": "INTEGER NOT NULL DEFAULT 50",
+            "status": "TEXT NOT NULL DEFAULT 'completed'",
+            "pages_crawled": "INTEGER NOT NULL DEFAULT 0",
+            "pages_discovered": "INTEGER NOT NULL DEFAULT 0",
+            "successful_requests": "INTEGER NOT NULL DEFAULT 0",
+            "failed_requests": "INTEGER NOT NULL DEFAULT 0",
+            "phase": "TEXT NOT NULL DEFAULT 'completed'",
+            "queued_urls": "INTEGER NOT NULL DEFAULT 0",
+            "active_workers": "INTEGER NOT NULL DEFAULT 0",
+            "pages_per_second": "REAL NOT NULL DEFAULT 0",
+            "current_depth": "INTEGER NOT NULL DEFAULT 0",
+            "current_url": "TEXT",
+            "completion_reason": "TEXT",
+            "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
+            "error_message": "TEXT",
+        }
+        for name, definition in job_column_definitions.items():
+            if name not in job_columns:
+                connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
 
         page_columns = self._table_columns(connection, "pages")
         columns = {

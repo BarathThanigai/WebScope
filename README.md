@@ -10,7 +10,8 @@ It started as a concurrent web crawler and now includes a FastAPI audit backend,
 - `robots.txt` checking before page fetches
 - WebScopeBot User-Agent, polite crawl delay, retry/backoff for temporary failures, and sitemap.xml discovery
 - Failure reason classification for robots blocks, timeouts, connection errors, rate limits, and HTTP errors
-- Crawl jobs with persistent IDs
+- Asynchronous crawl jobs with persistent IDs and status tracking
+- Production-style live crawl monitor with SSE updates, heartbeat events, phases, queue depth, worker counts, crawl speed, ETA, and cancellation
 - Safety limits: `max_depth <= 3`, `max_concurrency <= 20`, `max_pages <= 200`
 - Timeout handling and friendly blocked-site messages
 - Link issue classification for true broken links, crawler-inaccessible URLs, server errors, rate limits, and redirect issues
@@ -189,6 +190,9 @@ GET /
 GET /health
 POST /crawl
 GET /crawl/{job_id}
+GET /crawl/{job_id}/status
+GET /crawl/{job_id}/events
+POST /crawl/{job_id}/cancel
 GET /crawl/{job_id}/broken-links
 GET /crawl/{job_id}/graph
 GET /crawl/{job_id}/report
@@ -216,15 +220,64 @@ Sample response:
 ```json
 {
   "job_id": "2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7",
-  "crawled_pages": 50,
-  "total_links_found": 420,
-  "failed_requests": 0,
-  "slow_pages": 2,
-  "seo_issues": 8,
-  "health_score": 92,
-  "message": "Crawl completed. Full results are available at /crawl/2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7."
+  "status": "queued",
+  "message": "Crawl job created."
 }
 ```
+
+The crawl continues in the background. Subscribe to live progress with Server-Sent Events:
+
+```http
+GET /crawl/{job_id}/events
+Accept: text/event-stream
+```
+
+Each SSE message contains the same JSON shape as the status endpoint, including monitor fields for crawl phase, queued URLs, active workers, crawl speed, and completion reason:
+
+```text
+data: {"job_id":"...","status":"running","phase":"crawling","pages_crawled":12,"pages_discovered":43,"successful_requests":11,"failed_requests":1,"queued_urls":31,"active_workers":4,"pages_per_second":2.4,"current_depth":1,"current_url":"https://books.toscrape.com/catalogue/page-2.html","started_at":"2026-07-12T10:00:00+00:00","completed_at":null,"completion_reason":null,"error_message":null}
+```
+
+The stream sends updates about every 750 ms, includes named `heartbeat` events to keep hosted connections alive, and closes automatically when the job reaches `completed`, `failed`, or `cancelled`. Clients can fall back to polling:
+
+```http
+GET /crawl/{job_id}/status
+```
+
+Sample status response:
+
+```json
+{
+  "job_id": "2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7",
+  "status": "running",
+  "phase": "crawling",
+  "pages_crawled": 12,
+  "pages_discovered": 43,
+  "successful_requests": 11,
+  "failed_requests": 1,
+  "queued_urls": 31,
+  "active_workers": 4,
+  "pages_per_second": 2.4,
+  "current_depth": 1,
+  "current_url": "https://books.toscrape.com/catalogue/page-2.html",
+  "started_at": "2026-07-12T10:00:00+00:00",
+  "completed_at": null,
+  "completion_reason": null,
+  "error_message": null
+}
+```
+
+Valid job states are `queued`, `running`, `completed`, `failed`, and `cancelled`. Supported crawl phases are `queued`, `checking_robots`, `discovering_sitemap`, `crawling`, `generating_report`, `completed`, `failed`, and `cancelled`.
+
+Completion reasons include `page_limit_reached`, `queue_exhausted`, `max_depth_reached`, `cancelled_by_user`, and `failed`.
+
+To cancel an active crawl:
+
+```http
+POST /crawl/{job_id}/cancel
+```
+
+Cancellation is cooperative: WebScope stops scheduling new pages, lets active requests finish safely, saves partial results, and then marks the job as `cancelled`. Reports, page results, graph data, and CSV export remain available through their existing endpoints after a crawl has produced data.
 
 ## Deployment
 
@@ -332,7 +385,6 @@ The frontend uses React Flow for zoom, pan, fit view, minimap, and click-to-insp
 
 ## Roadmap
 
-- Live crawl progress and streaming job status
-- Dockerfile and Docker Compose for local full-stack startup
-- Persistent production database option such as Postgres
+- WebSocket collaboration mode for multi-user audit sessions
+- Docker image hardening and deployment templates
 - Scheduled recurring audits and historical report comparison
