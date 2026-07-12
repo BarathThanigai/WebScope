@@ -1059,6 +1059,12 @@ input:focus { outline: 3px solid var(--accent-soft); border-color: var(--accent)
   color: var(--success);
 }
 
+.status-badge.partial-success {
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--border));
+  color: var(--warning);
+}
+
 .status-badge.failed,
 .status-badge.cancelled {
   background: color-mix(in srgb, var(--danger) 14%, var(--surface));
@@ -1103,6 +1109,32 @@ input:focus { outline: 3px solid var(--accent-soft); border-color: var(--accent)
   display: grid;
   gap: 10px 18px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.failed-outcome {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border));
+  border-radius: 12px;
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+}
+
+.failed-outcome span {
+  color: var(--danger);
+  font-size: 0.82rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.failed-outcome strong {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.failed-outcome p {
+  color: var(--text-secondary);
+  margin: 0;
 }
 
 .current-url {

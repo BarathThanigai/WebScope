@@ -22,6 +22,15 @@ from models import (
     StatsResponse,
 )
 from services.crawl_tasks import run_crawl_job
+from services.queue import CRAWL_QUEUE_NAME, USE_RQ, crawl_queue, redis_connection
+
+try:
+    from rq.job import Job
+    from rq.registry import FailedJobRegistry, StartedJobRegistry
+except ImportError:
+    Job = None
+    FailedJobRegistry = None
+    StartedJobRegistry = None
 
 app = FastAPI(title="Concurrent Web Crawler")
 app.add_middleware(
@@ -56,6 +65,7 @@ def root() -> dict[str, str | list[str]]:
             "/pages",
             "/stats",
             "/health",
+            "/queue/health",
         ],
     }
 
@@ -86,15 +96,35 @@ async def crawl(
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    background_tasks.add_task(
-        run_crawl_job,
-        job_id,
-        str(request.seed_url),
-        request.max_depth,
-        request.max_concurrency,
-        request.max_pages,
-        db,
-    )
+    if USE_RQ:
+        try:
+            rq_job = crawl_queue.enqueue(
+                run_crawl_job,
+                job_id,
+                str(request.seed_url),
+                request.max_depth,
+                request.max_concurrency,
+                request.max_pages,
+                job_timeout="30m",
+                result_ttl=3600,
+                failure_ttl=86400,
+            )
+            db.set_rq_job_id(job_id, rq_job.id)
+        except Exception as exc:
+            db.fail_job(job_id, "Failed to enqueue crawl job")
+            raise HTTPException(
+                status_code=503,
+                detail="Unable to enqueue crawl job. Please try again later.",
+            ) from exc
+    else:
+        background_tasks.add_task(
+            run_crawl_job,
+            job_id,
+            str(request.seed_url),
+            request.max_depth,
+            request.max_concurrency,
+            request.max_pages,
+        )
 
     return CrawlResponse(
         job_id=job_id,
@@ -127,11 +157,62 @@ def cancel_crawl(job_id: str, db: Database = Depends(get_database)) -> CrawlStat
 
     if status.status not in {"completed", "failed", "cancelled"}:
         db.request_job_cancel(job_id)
+        if USE_RQ:
+            removed_from_queue = _cancel_queued_rq_job(db.get_rq_job_id(job_id))
+            if removed_from_queue:
+                db.cancel_job(job_id)
 
     updated_status = db.get_job_status(job_id)
     if updated_status is None:
         raise HTTPException(status_code=404, detail="Crawl job not found")
     return updated_status
+
+
+@app.get("/queue/health")
+def queue_health() -> dict[str, int | str | bool]:
+    queued_jobs = 0
+    started_jobs = 0
+    failed_jobs = 0
+    redis_connected = False
+
+    try:
+        redis_connected = bool(redis_connection.ping())
+        queued_jobs = crawl_queue.count
+        if StartedJobRegistry is not None:
+            started_jobs = len(
+                StartedJobRegistry(CRAWL_QUEUE_NAME, connection=redis_connection).get_job_ids()
+            )
+        if FailedJobRegistry is not None:
+            failed_jobs = len(
+                FailedJobRegistry(CRAWL_QUEUE_NAME, connection=redis_connection).get_job_ids()
+            )
+    except Exception:
+        redis_connected = False
+
+    return {
+        "redis_connected": redis_connected,
+        "queue_name": CRAWL_QUEUE_NAME,
+        "queued_jobs": queued_jobs,
+        "started_jobs": started_jobs,
+        "failed_jobs": failed_jobs,
+    }
+
+
+def _cancel_queued_rq_job(rq_job_id: str | None) -> bool:
+    if not rq_job_id or Job is None:
+        return False
+
+    try:
+        job = Job.fetch(rq_job_id, connection=redis_connection)
+        status = job.get_status(refresh=True)
+        status_value = getattr(status, "value", str(status))
+        if status_value in {"queued", "deferred", "scheduled"}:
+            job.cancel()
+            job.delete()
+            return True
+    except Exception:
+        return False
+    return False
 
 
 @app.get("/crawl/{job_id}/events")

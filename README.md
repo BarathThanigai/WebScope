@@ -55,7 +55,7 @@ Backend:
 - BeautifulSoup
 - PostgreSQL primary database
 - Optional SQLite local fallback
-- Redis + RQ worker scaffold for future queue-backed crawls
+- Redis + RQ background workers for crawl execution
 - Pydantic
 
 Frontend:
@@ -97,10 +97,11 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
-uvicorn main:app --reload
 ```
 
 PostgreSQL is the primary database. Set `DATABASE_URL` in `.env` before starting the backend. For local-only development without PostgreSQL, set `USE_SQLITE_FALLBACK=true` to use SQLite at `crawler.db`.
+
+RQ is the recommended crawl execution mode. Set `USE_RQ=true` and `REDIS_URL=redis://localhost:6379` in `.env`.
 
 Backend URL:
 
@@ -116,7 +117,7 @@ http://127.0.0.1:8000/docs
 
 ## Redis and RQ Worker Setup
 
-WebScope is prepared for Redis Queue workers, but the API still uses FastAPI background tasks in the current version. No crawl jobs are enqueued yet.
+WebScope enqueues crawl jobs into Redis Queue by default. FastAPI creates the database job record, pushes the crawl task to the `crawls` queue, and returns immediately. A separate worker process executes the crawl and updates PostgreSQL/SQLite progress for SSE and polling.
 
 Install Redis locally:
 
@@ -148,7 +149,34 @@ Start the prepared worker in a separate terminal:
 python worker.py
 ```
 
-The worker listens on the `crawls` queue. It is scaffolded for the next phase and does not change current crawl behavior.
+Worker selection is automatic:
+
+- Windows uses `rq.SimpleWorker`, which avoids Unix-only process forking.
+- Linux, macOS, and Render production workers use `rq.Worker`.
+
+Start FastAPI in another terminal:
+
+```powershell
+uvicorn main:app --reload
+```
+
+The worker listens on the `crawls` queue. For local emergency use only, set `USE_RQ=false` to run crawls in the web process with FastAPI background tasks.
+
+Test queued crawl execution:
+
+1. Start Redis.
+2. Start `python worker.py`.
+3. Start `uvicorn main:app --reload`.
+4. Submit `POST /crawl` from `/docs` or the React dashboard.
+5. Watch `GET /crawl/{job_id}/status`, `GET /crawl/{job_id}/events`, and `GET /queue/health`.
+
+Queue health endpoint:
+
+```http
+GET /queue/health
+```
+
+Returns Redis connectivity, queue name, queued jobs, started jobs, and failed jobs.
 
 ## Local Frontend Setup
 
@@ -199,6 +227,7 @@ DATABASE_PATH=crawler.db
 DATABASE_URL=postgresql://user:password@host:5432/webscope?sslmode=require
 USE_SQLITE_FALLBACK=false
 REDIS_URL=redis://localhost:6379
+USE_RQ=true
 ```
 
 Database behavior:
@@ -206,6 +235,8 @@ Database behavior:
 - `DATABASE_URL` is required by default.
 - Set `DATABASE_URL` to a PostgreSQL database for local or production use.
 - For local SQLite development only, set `USE_SQLITE_FALLBACK=true`.
+- `USE_RQ=true` is recommended for production so crawls run outside the FastAPI web process.
+- `REDIS_URL` is required when `USE_RQ=true`.
 - Neon/Supabase-style PostgreSQL example:
 
 ```text
@@ -230,6 +261,7 @@ VITE_API_URL=http://127.0.0.1:8000
 ```http
 GET /
 GET /health
+GET /queue/health
 POST /crawl
 GET /crawl/{job_id}
 GET /crawl/{job_id}/status
@@ -274,10 +306,10 @@ GET /crawl/{job_id}/events
 Accept: text/event-stream
 ```
 
-Each SSE message contains the same JSON shape as the status endpoint, including monitor fields for crawl phase, queued URLs, active workers, crawl speed, and completion reason:
+Each SSE message contains the same JSON shape as the status endpoint, including monitor fields for crawl phase, audit outcome, queued URLs, active workers, crawl speed, and completion reason:
 
 ```text
-data: {"job_id":"...","status":"running","phase":"crawling","pages_crawled":12,"pages_discovered":43,"successful_requests":11,"failed_requests":1,"queued_urls":31,"active_workers":4,"pages_per_second":2.4,"current_depth":1,"current_url":"https://books.toscrape.com/catalogue/page-2.html","started_at":"2026-07-12T10:00:00+00:00","completed_at":null,"completion_reason":null,"error_message":null}
+data: {"job_id":"...","status":"running","outcome":null,"phase":"crawling","pages_crawled":12,"pages_discovered":43,"successful_requests":11,"failed_requests":1,"queued_urls":31,"active_workers":4,"pages_per_second":2.4,"current_depth":1,"current_url":"https://books.toscrape.com/catalogue/page-2.html","started_at":"2026-07-12T10:00:00+00:00","completed_at":null,"completion_reason":null,"error_message":null}
 ```
 
 The stream sends updates about every 750 ms, includes named `heartbeat` events to keep hosted connections alive, and closes automatically when the job reaches `completed`, `failed`, or `cancelled`. Clients can fall back to polling:
@@ -292,6 +324,7 @@ Sample status response:
 {
   "job_id": "2f5b8cc8-0f2b-4f2d-a514-6566b4dfc9e7",
   "status": "running",
+  "outcome": null,
   "phase": "crawling",
   "pages_crawled": 12,
   "pages_discovered": 43,
@@ -309,9 +342,19 @@ Sample status response:
 }
 ```
 
-Valid job states are `queued`, `running`, `completed`, `failed`, and `cancelled`. Supported crawl phases are `queued`, `checking_robots`, `discovering_sitemap`, `crawling`, `generating_report`, `completed`, `failed`, and `cancelled`.
+Valid execution states are `queued`, `running`, `completed`, `failed`, and `cancelled`. Audit outcome is reported separately as `success`, `partial_success`, or `failed`.
 
-Completion reasons include `page_limit_reached`, `queue_exhausted`, `max_depth_reached`, `cancelled_by_user`, and `failed`.
+Outcome rules:
+
+- `success`: at least one successful page and no failed requests
+- `partial_success`: at least one successful page and one or more failed requests
+- `failed`: zero successful pages
+
+Supported crawl phases are `queued`, `checking_robots`, `discovering_sitemap`, `crawling`, `generating_report`, `completed`, `failed`, and `cancelled`.
+
+Completion reasons include `page_limit_reached`, `queue_exhausted`, `max_depth_reached`, `seed_url_unreachable`, `cancelled_by_user`, and `failed`.
+
+If the seed URL cannot be reached and no pages succeed, the execution status is still `completed`, but the audit outcome is `failed`, the completion reason is `seed_url_unreachable`, and `error_message` contains a user-facing reason.
 
 To cancel an active crawl:
 
