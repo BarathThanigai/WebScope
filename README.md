@@ -473,3 +473,12 @@ The frontend uses React Flow for zoom, pan, fit view, minimap, and click-to-insp
 - WebSocket collaboration mode for multi-user audit sessions
 - Docker image hardening and deployment templates
 - Scheduled recurring audits and historical report comparison
+
+## Copyright
+
+Copyright © 2026 Barath.
+
+All Rights Reserved.
+
+This repository is intended for portfolio and evaluation purposes only.
+No permission is granted to use, copy, modify, distribute, or create derivative works from this software without prior written permission from the author.
