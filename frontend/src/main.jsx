@@ -32,6 +32,7 @@ const emptyReport = {
 const emptyProgress = {
   job_id: "",
   status: "idle",
+  outcome: null,
   phase: "queued",
   pages_crawled: 0,
   pages_discovered: 0,
@@ -73,8 +74,18 @@ function formatCompletionReason(reason) {
     max_depth_reached: "Max depth reached",
     cancelled_by_user: "Cancelled by user",
     failed: "Failed",
+    seed_url_unreachable: "Seed URL unreachable",
   };
   return labels[reason] || reason || "Not available";
+}
+
+function formatOutcomeLabel(progress) {
+  if (progress.status === "completed") {
+    if (progress.outcome === "failed") return "Audit failed";
+    if (progress.outcome === "partial_success") return "Completed with errors";
+    return "Completed successfully";
+  }
+  return progress.status;
 }
 
 function DashboardApp({ onHome }) {
@@ -222,7 +233,14 @@ function DashboardApp({ onHome }) {
     if (status.status === "completed") {
       await loadJob(status.job_id);
       setActiveTab("overview");
-      setMessage("Crawl completed. Full results are loaded.");
+      if (status.outcome === "failed") {
+        setError(status.error_message || "Audit failed. The seed URL could not be crawled.");
+        setMessage("");
+      } else if (status.outcome === "partial_success") {
+        setMessage("Completed with errors. Full results are loaded.");
+      } else {
+        setMessage("Completed successfully. Full results are loaded.");
+      }
       return;
     }
 
@@ -459,8 +477,18 @@ function ProgressPanel({ progress, loading, activity, onCancel }) {
   const isActive = loading || ["queued", "running"].includes(progress.status);
   const reachedPageLimit = progress.status === "completed" && crawlLimit > 0 && crawled >= crawlLimit && discovered > crawlLimit;
   const remainingPages = Math.max(0, denominator - crawled);
-  const eta = isActive && speed > 0.1 && remainingPages > 0 ? `${Math.ceil(remainingPages / speed)}s` : "Calculating";
+  const eta = terminalStatuses.has(progress.status)
+    ? "—"
+    : isActive && speed > 0.1 && remainingPages > 0
+      ? `${Math.ceil(remainingPages / speed)}s`
+      : "Calculating";
   const canCancel = ["queued", "running"].includes(progress.status) && progress.completion_reason !== "cancelled_by_user";
+  const outcomeLabel = formatOutcomeLabel(progress);
+  const badgeClass = progress.outcome === "failed"
+    ? "failed"
+    : progress.outcome === "partial_success"
+      ? "partial-success"
+      : progress.status;
 
   return (
     <section className={`panel progress-panel ${isActive ? "active" : ""}`}>
@@ -471,7 +499,7 @@ function ProgressPanel({ progress, loading, activity, onCancel }) {
         </div>
         <div className="monitor-actions">
           {canCancel && <button className="danger-button" onClick={onCancel}>Cancel Audit</button>}
-          <span className={`status-badge ${progress.status}`}>{progress.status}</span>
+          <span className={`status-badge ${badgeClass}`}>{outcomeLabel}</span>
         </div>
       </div>
 
@@ -487,6 +515,14 @@ function ProgressPanel({ progress, loading, activity, onCancel }) {
           <strong>Cancelled audit. Partial results are available below.</strong>
         )}
       </div>
+
+      {progress.outcome === "failed" && (
+        <div className="failed-outcome">
+          <span>Audit failed</span>
+          <strong title={progress.current_url || ""}>{progress.current_url || "Seed URL unavailable"}</strong>
+          <p>{progress.error_message || "The seed URL could not be crawled successfully."}</p>
+        </div>
+      )}
 
       <div className="progress-grid">
         <ReportRow label="Crawl phase" value={progress.phase || progress.status} />

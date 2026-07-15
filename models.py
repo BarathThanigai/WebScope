@@ -41,6 +41,7 @@ class CrawlResponse(BaseModel):
 class CrawlStatusResponse(BaseModel):
     job_id: str
     status: str
+    outcome: str | None = None
     phase: str
     pages_crawled: int
     pages_discovered: int

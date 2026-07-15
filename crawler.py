@@ -135,6 +135,7 @@ class ConcurrentCrawler:
                     queue
                     and queue[0][1] == current_depth
                     and len(results) + len(batch) < self.max_pages
+                    and len(batch) < self.max_concurrency
                 ):
                     batch.append(queue.popleft())
 

@@ -131,6 +131,21 @@ class Database:
                 ),
             )
 
+    def set_rq_job_id(self, job_id: str, rq_job_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE jobs SET rq_job_id = ? WHERE job_id = ?",
+                (rq_job_id, job_id),
+            )
+
+    def get_rq_job_id(self, job_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT rq_job_id FROM jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return row["rq_job_id"] if row else None
+
     def start_job(self, job_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -157,6 +172,7 @@ class Database:
         active_workers: int | None = None,
         pages_per_second: float | None = None,
         completion_reason: str | None = None,
+        outcome: str | None = None,
     ) -> None:
         updates = {
             "pages_crawled": pages_crawled,
@@ -170,6 +186,7 @@ class Database:
             "active_workers": active_workers,
             "pages_per_second": pages_per_second,
             "completion_reason": completion_reason,
+            "outcome": outcome,
         }
         assignments = [f"{name} = ?" for name, value in updates.items() if value is not None]
         values = [value for value in updates.values() if value is not None]
@@ -182,16 +199,33 @@ class Database:
                 (*values, job_id),
             )
 
-    def complete_job(self, job_id: str, completion_reason: str = "queue_exhausted") -> None:
+    def complete_job(
+        self,
+        job_id: str,
+        completion_reason: str = "queue_exhausted",
+        outcome: str = "success",
+        error_message: str | None = None,
+        current_url: str | None = None,
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE jobs
-                SET status = ?, phase = ?, completed_at = ?, current_url = NULL,
-                    active_workers = 0, completion_reason = ?
+                SET status = ?, outcome = ?, phase = ?, completed_at = ?,
+                    current_url = ?, active_workers = 0, completion_reason = ?,
+                    error_message = ?
                 WHERE job_id = ?
                 """,
-                ("completed", "completed", self._utc_now(), completion_reason, job_id),
+                (
+                    "completed",
+                    outcome,
+                    "completed",
+                    self._utc_now(),
+                    current_url,
+                    completion_reason,
+                    error_message[:500] if error_message else None,
+                    job_id,
+                ),
             )
 
     def fail_job(self, job_id: str, error_message: str) -> None:
@@ -199,11 +233,19 @@ class Database:
             connection.execute(
                 """
                 UPDATE jobs
-                SET status = ?, phase = ?, completed_at = ?, error_message = ?,
+                SET status = ?, outcome = ?, phase = ?, completed_at = ?, error_message = ?,
                     current_url = NULL, active_workers = 0, completion_reason = ?
                 WHERE job_id = ?
                 """,
-                ("failed", "failed", self._utc_now(), error_message[:500], "failed", job_id),
+                (
+                    "failed",
+                    "failed",
+                    "failed",
+                    self._utc_now(),
+                    error_message[:500],
+                    "failed",
+                    job_id,
+                ),
             )
 
     def request_job_cancel(self, job_id: str) -> bool:
@@ -223,11 +265,18 @@ class Database:
             connection.execute(
                 """
                 UPDATE jobs
-                SET status = ?, phase = ?, completed_at = ?, current_url = NULL,
+                SET status = ?, outcome = ?, phase = ?, completed_at = ?, current_url = NULL,
                     active_workers = 0, completion_reason = ?
                 WHERE job_id = ?
                 """,
-                ("cancelled", "cancelled", self._utc_now(), "cancelled_by_user", job_id),
+                (
+                    "cancelled",
+                    None,
+                    "cancelled",
+                    self._utc_now(),
+                    "cancelled_by_user",
+                    job_id,
+                ),
             )
 
     def is_cancel_requested(self, job_id: str) -> bool:
@@ -365,7 +414,7 @@ class Database:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT job_id, status, pages_crawled, pages_discovered,
+                SELECT job_id, status, outcome, pages_crawled, pages_discovered,
                        successful_requests, failed_requests, phase, queued_urls,
                        active_workers, pages_per_second, current_depth,
                        current_url, started_at, completed_at, completion_reason,
@@ -382,6 +431,7 @@ class Database:
         return CrawlStatusResponse(
             job_id=row["job_id"],
             status=row["status"],
+            outcome=row["outcome"],
             phase=row["phase"],
             pages_crawled=row["pages_crawled"],
             pages_discovered=row["pages_discovered"],
@@ -525,11 +575,13 @@ class Database:
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
+                rq_job_id TEXT,
                 seed_url TEXT NOT NULL,
                 max_depth INTEGER NOT NULL,
                 max_concurrency INTEGER NOT NULL,
                 max_pages INTEGER NOT NULL DEFAULT 50,
                 status TEXT NOT NULL DEFAULT 'completed',
+                outcome TEXT,
                 pages_crawled INTEGER NOT NULL DEFAULT 0,
                 pages_discovered INTEGER NOT NULL DEFAULT 0,
                 successful_requests INTEGER NOT NULL DEFAULT 0,
@@ -635,7 +687,9 @@ class Database:
         job_columns = self._table_columns(connection, "jobs")
         job_column_definitions = {
             "max_pages": "INTEGER NOT NULL DEFAULT 50",
+            "rq_job_id": "TEXT",
             "status": "TEXT NOT NULL DEFAULT 'completed'",
+            "outcome": "TEXT",
             "pages_crawled": "INTEGER NOT NULL DEFAULT 0",
             "pages_discovered": "INTEGER NOT NULL DEFAULT 0",
             "successful_requests": "INTEGER NOT NULL DEFAULT 0",
