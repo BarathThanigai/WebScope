@@ -23,6 +23,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Check Python syntax and imports
+        env:
+          USE_RQ: "false"
+          USE_SQLITE_FALLBACK: "true"
         run: |
           python -m py_compile main.py crawler.py database.py models.py config.py
           python -c "import main; print(main.health())"
