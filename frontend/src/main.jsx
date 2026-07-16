@@ -147,7 +147,13 @@ function DashboardApp({ onHome }) {
       ...options,
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.detail || "The API request failed.");
+    if (!response.ok) {
+      const detail = data.detail;
+      const message = typeof detail === "string"
+        ? detail
+        : detail?.message || "The API request failed.";
+      throw new Error(message);
+    }
     return data;
   }
 

@@ -4,12 +4,12 @@ from models import CrawlReportResponse
 
 
 SUMMARY_JSON_SCHEMA = {
-    "executive_summary": "string",
-    "overall_assessment": "string",
-    "key_findings": ["string"],
-    "recommendations": ["string"],
-    "priority_actions": ["string"],
-    "strengths": ["string"],
+    "executive_summary": "1-2 concise sentences",
+    "overall_assessment": "1 concise paragraph",
+    "key_findings": ["up to 5 short strings"],
+    "recommendations": ["up to 5 short strings"],
+    "priority_actions": ["up to 5 short strings"],
+    "strengths": ["up to 5 short strings"],
     "risk_level": "low|medium|high",
 }
 
@@ -37,12 +37,11 @@ def build_audit_summary_messages(report: CrawlReportResponse) -> list[dict[str, 
         "failed_request_reasons": report.failed_by_reason,
         "top_slow_pages": [
             {
-                "url": page.url,
-                "title": page.title,
+                "title": page.title or "Untitled page",
                 "response_time_ms": page.response_time_ms,
                 "status_code": page.status_code,
             }
-            for page in report.top_10_slowest_pages[:10]
+            for page in report.top_10_slowest_pages[:5]
         ],
     }
 
@@ -51,14 +50,14 @@ def build_audit_summary_messages(report: CrawlReportResponse) -> list[dict[str, 
             "role": "system",
             "content": (
                 "You are WebScope's website audit analyst. Return only valid JSON. "
-                "Do not include markdown, comments, or extra text."
+                "Do not include markdown, comments, or extra text. Keep every list to 5 items or fewer."
             ),
         },
         {
             "role": "user",
             "content": (
                 "Generate a concise website audit summary from these metrics. "
-                "Use practical, prioritized recommendations. "
+                "Use practical, prioritized recommendations. Keep the response compact. "
                 f"Return JSON matching this schema: {json.dumps(SUMMARY_JSON_SCHEMA)}. "
                 f"Audit metrics: {json.dumps(payload, ensure_ascii=False)}"
             ),

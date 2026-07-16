@@ -239,6 +239,7 @@ AI_PROVIDER=nvidia
 AI_API_KEY=
 AI_BASE_URL=https://integrate.api.nvidia.com/v1
 AI_MODEL=z-ai/glm-5.2
+AI_TIMEOUT_SECONDS=90
 ```
 
 Database behavior:
@@ -280,9 +281,20 @@ AI_PROVIDER=nvidia
 AI_API_KEY=your-nvidia-api-key
 AI_BASE_URL=https://integrate.api.nvidia.com/v1
 AI_MODEL=z-ai/glm-5.2
+AI_TIMEOUT_SECONDS=90
 ```
 
-The prompt does not send raw HTML or every crawled page. It sends health score, page/link counts, SEO issue counts, link issue summary, failed request reasons, response-time stats, and the top slow pages already present in the crawl report.
+The prompt does not send raw HTML, all pages, or page URLs. It sends compact report metrics: health score, page/link counts, SEO issue counts, link issue summary, failed request reasons, response-time stats, and at most 5 top slow page examples without URLs. Output is capped to a concise JSON response.
+
+The NVIDIA provider uses a 90-second timeout by default, retries once for timeouts or temporary 5xx provider failures, and does not retry authentication, rate-limit, or invalid-model errors.
+
+Connectivity test:
+
+```powershell
+python scripts/test_nvidia_connectivity.py
+```
+
+The test prints provider, model, latency, and success status. It never prints `AI_API_KEY`.
 
 To swap providers, add another implementation of the `AIProvider` interface under `services/ai`, then update `get_ai_provider()` in `services/ai/provider.py` to select it from `AI_PROVIDER`.
 

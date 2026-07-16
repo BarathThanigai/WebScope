@@ -289,7 +289,10 @@ def crawl_ai_summary(
     try:
         summary = get_ai_provider().generate_summary(report)
     except AIProviderError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.public_message) from exc
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error_type": exc.error_type, "message": exc.public_message},
+        ) from exc
 
     return AISummaryResponse(**summary.model_dump())
 

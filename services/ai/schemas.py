@@ -16,3 +16,4 @@ class AIProviderConfig(BaseModel):
     api_key: str | None = None
     base_url: str
     model: str
+    timeout_seconds: float = 90.0
