@@ -28,9 +28,10 @@ It started as a concurrent web crawler and now includes a FastAPI audit backend,
   - slow page flag for pages over 1000 ms
   - average, min, and max response time per crawl job
 - Crawl report endpoint with health score and top 10 slowest pages
+- AI-powered audit summary endpoint using NVIDIA's OpenAI-compatible API
 - Interactive site graph endpoint and React Flow visualization
 - CSV export per crawl job
-- React dashboard with Overview, Pages, Link Issues, SEO Issues, Performance, and Site Graph sections
+- React dashboard with Overview, Pages, Link Issues, SEO Issues, Performance, Site Graph, and AI Summary sections
 
 ## Recommended Test Sites
 
@@ -56,6 +57,7 @@ Backend:
 - PostgreSQL primary database
 - Optional SQLite local fallback
 - Redis + RQ background workers for crawl execution
+- OpenAI Python SDK for OpenAI-compatible AI providers
 - Pydantic
 
 Frontend:
@@ -75,6 +77,11 @@ Frontend:
 ├── models.py            # Pydantic request/response models
 ├── config.py            # Environment-based CORS config
 ├── services/
+│   ├── ai/
+│   │   ├── provider.py        # Provider abstraction and config loading
+│   │   ├── nvidia_provider.py # NVIDIA OpenAI-compatible implementation
+│   │   ├── prompts.py         # Audit summary prompt construction
+│   │   └── schemas.py         # AI response validation models
 │   ├── queue.py         # Redis connection and RQ crawls queue
 │   └── crawl_tasks.py   # Crawl task execution logic
 ├── worker.py            # RQ worker entrypoint
@@ -228,6 +235,11 @@ DATABASE_URL=postgresql://user:password@host:5432/webscope?sslmode=require
 USE_SQLITE_FALLBACK=false
 REDIS_URL=redis://localhost:6379
 USE_RQ=true
+AI_PROVIDER=nvidia
+AI_API_KEY=
+AI_BASE_URL=https://integrate.api.nvidia.com/v1
+AI_MODEL=z-ai/glm-5.2
+AI_TIMEOUT_SECONDS=90
 ```
 
 Database behavior:
@@ -237,6 +249,8 @@ Database behavior:
 - For local SQLite development only, set `USE_SQLITE_FALLBACK=true`.
 - `USE_RQ=true` is recommended for production so crawls run outside the FastAPI web process.
 - `REDIS_URL` is required when `USE_RQ=true`.
+- `AI_API_KEY` is required only when generating AI summaries. Never expose it to the frontend.
+- `AI_PROVIDER=nvidia` uses NVIDIA's OpenAI-compatible API through the official OpenAI Python SDK.
 - Neon/Supabase-style PostgreSQL example:
 
 ```text
@@ -256,6 +270,34 @@ Frontend:
 VITE_API_URL=http://127.0.0.1:8000
 ```
 
+## AI Summary Provider
+
+WebScope's AI layer is isolated under `services/ai`. The FastAPI route loads the existing crawl report, sends only aggregate audit metrics to the configured provider, validates the returned JSON with Pydantic, and returns a clean summary to the dashboard.
+
+NVIDIA setup:
+
+```text
+AI_PROVIDER=nvidia
+AI_API_KEY=your-nvidia-api-key
+AI_BASE_URL=https://integrate.api.nvidia.com/v1
+AI_MODEL=z-ai/glm-5.2
+AI_TIMEOUT_SECONDS=90
+```
+
+The prompt does not send raw HTML, all pages, or page URLs. It sends compact report metrics: health score, page/link counts, SEO issue counts, link issue summary, failed request reasons, response-time stats, and at most 5 top slow page examples without URLs. Output is capped to a concise JSON response.
+
+The NVIDIA provider uses a 90-second timeout by default, retries once for timeouts or temporary 5xx provider failures, and does not retry authentication, rate-limit, or invalid-model errors.
+
+Connectivity test:
+
+```powershell
+python scripts/test_nvidia_connectivity.py
+```
+
+The test prints provider, model, latency, and success status. It never prints `AI_API_KEY`.
+
+To swap providers, add another implementation of the `AIProvider` interface under `services/ai`, then update `get_ai_provider()` in `services/ai/provider.py` to select it from `AI_PROVIDER`.
+
 ## API Endpoints
 
 ```http
@@ -270,6 +312,7 @@ POST /crawl/{job_id}/cancel
 GET /crawl/{job_id}/broken-links
 GET /crawl/{job_id}/graph
 GET /crawl/{job_id}/report
+POST /crawl/{job_id}/ai-summary
 GET /crawl/{job_id}/export/csv
 GET /pages?job_id={job_id}&limit=50&offset=0
 GET /stats

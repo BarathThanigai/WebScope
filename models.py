@@ -117,6 +117,16 @@ class CrawlReportResponse(BaseModel):
     top_10_slowest_pages: list[PageRecord]
 
 
+class AISummaryResponse(BaseModel):
+    executive_summary: str
+    overall_assessment: str
+    key_findings: list[str]
+    recommendations: list[str]
+    priority_actions: list[str]
+    strengths: list[str]
+    risk_level: str
+
+
 class SiteGraphNode(BaseModel):
     id: str
     url: str
