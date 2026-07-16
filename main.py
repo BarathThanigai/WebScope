@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from config import ALLOWED_ORIGINS
 from database import Database, get_database
 from models import (
+    AISummaryResponse,
     BrokenLinkRecord,
     CrawlJobResponse,
     CrawlReportResponse,
@@ -21,6 +22,7 @@ from models import (
     SiteGraphResponse,
     StatsResponse,
 )
+from services.ai.provider import AIProviderError, get_ai_provider
 from services.crawl_tasks import run_crawl_job
 from services.queue import CRAWL_QUEUE_NAME, USE_RQ, crawl_queue, redis_connection
 
@@ -61,6 +63,7 @@ def root() -> dict[str, str | list[str]]:
             "/crawl/{job_id}/broken-links",
             "/crawl/{job_id}/graph",
             "/crawl/{job_id}/report",
+            "/crawl/{job_id}/ai-summary",
             "/crawl/{job_id}/export/csv",
             "/pages",
             "/stats",
@@ -272,6 +275,23 @@ def crawl_report(job_id: str, db: Database = Depends(get_database)) -> CrawlRepo
     if report is None:
         raise HTTPException(status_code=404, detail="Crawl job not found")
     return report
+
+
+@app.post("/crawl/{job_id}/ai-summary", response_model=AISummaryResponse)
+def crawl_ai_summary(
+    job_id: str,
+    db: Database = Depends(get_database),
+) -> AISummaryResponse:
+    report = db.get_report(job_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Crawl job not found")
+
+    try:
+        summary = get_ai_provider().generate_summary(report)
+    except AIProviderError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.public_message) from exc
+
+    return AISummaryResponse(**summary.model_dump())
 
 
 @app.get("/crawl/{job_id}/graph", response_model=SiteGraphResponse)

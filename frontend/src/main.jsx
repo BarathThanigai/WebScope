@@ -50,6 +50,8 @@ const emptyProgress = {
   error_message: null,
 };
 
+const emptyAiSummary = null;
+
 const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
 
 function formatMs(value) {
@@ -103,6 +105,9 @@ function DashboardApp({ onHome }) {
   const [report, setReport] = useState(emptyReport);
   const [linkIssues, setLinkIssues] = useState([]);
   const [graph, setGraph] = useState({ nodes: [], edges: [] });
+  const [aiSummary, setAiSummary] = useState(emptyAiSummary);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
   const [selectedNode, setSelectedNode] = useState(null);
   const [jobSearch, setJobSearch] = useState("");
   const [progress, setProgress] = useState(emptyProgress);
@@ -159,6 +164,8 @@ function DashboardApp({ onHome }) {
     setReport(reportData);
     setLinkIssues(linkIssueData);
     setGraph(graphData);
+    setAiSummary(emptyAiSummary);
+    setAiError("");
     setSelectedNode(null);
     setJobSearch(jobId);
     setProgress((current) => ({
@@ -313,6 +320,8 @@ function DashboardApp({ onHome }) {
     setReport(emptyReport);
     setLinkIssues([]);
     setGraph({ nodes: [], edges: [] });
+    setAiSummary(emptyAiSummary);
+    setAiError("");
     setSelectedNode(null);
     setProgress(emptyProgress);
     setActivity([]);
@@ -362,6 +371,20 @@ function DashboardApp({ onHome }) {
   function exportCsv() {
     if (!job?.job_id) return;
     window.open(`${API_URL}/crawl/${job.job_id}/export/csv`, "_blank", "noopener,noreferrer");
+  }
+
+  async function generateAiSummary() {
+    if (!job?.job_id) return;
+    setAiLoading(true);
+    setAiError("");
+    try {
+      const result = await request(`/crawl/${job.job_id}/ai-summary`, { method: "POST" });
+      setAiSummary(result);
+    } catch (err) {
+      setAiError(err.message);
+    } finally {
+      setAiLoading(false);
+    }
   }
 
   async function loadExistingJob(jobId) {
@@ -434,7 +457,7 @@ function DashboardApp({ onHome }) {
       </section>
 
       <nav className="tabs">
-        {["overview", "pages", "link issues", "seo issues", "performance", "site graph"].map((tab) => (
+        {["overview", "pages", "link issues", "seo issues", "performance", "site graph", "ai summary"].map((tab) => (
           <button key={tab} className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>{tab}</button>
         ))}
       </nav>
@@ -446,6 +469,15 @@ function DashboardApp({ onHome }) {
       {activeTab === "performance" && <Performance report={report} pages={slowPages} />}
       {activeTab === "site graph" && (
         <SiteGraph graph={graph} selectedNode={selectedNode} setSelectedNode={setSelectedNode} />
+      )}
+      {activeTab === "ai summary" && (
+        <AiSummaryPanel
+          summary={aiSummary}
+          loading={aiLoading}
+          error={aiError}
+          disabled={!job}
+          onGenerate={generateAiSummary}
+        />
       )}
     </main>
   );
@@ -726,6 +758,63 @@ function Performance({ report, pages }) {
       </section>
       <PagesTable pages={pages.length ? pages : report.top_10_slowest_pages} title="Slowest Pages" />
     </>
+  );
+}
+
+function AiSummaryPanel({ summary, loading, error, disabled, onGenerate }) {
+  return (
+    <section className="panel ai-summary-panel">
+      <div className="section-header">
+        <div>
+          <h2>AI Summary</h2>
+          <span className="muted">Generate audit insights from the loaded crawl report.</span>
+        </div>
+        <button className="primary" disabled={disabled || loading} onClick={onGenerate}>
+          {loading ? "Generating..." : "Generate Summary"}
+        </button>
+      </div>
+
+      {disabled && <p className="muted">Load or complete a crawl before generating an AI summary.</p>}
+      {error && <div className="alert error">{error}</div>}
+
+      {summary ? (
+        <div className="ai-summary-grid">
+          <article className="ai-summary-card wide">
+            <span>Risk Level</span>
+            <strong className={`risk ${summary.risk_level}`}>{summary.risk_level}</strong>
+          </article>
+          <article className="ai-summary-card wide">
+            <span>Executive Summary</span>
+            <p>{summary.executive_summary}</p>
+          </article>
+          <article className="ai-summary-card wide">
+            <span>Overall Assessment</span>
+            <p>{summary.overall_assessment}</p>
+          </article>
+          <AiSummaryList title="Key Findings" items={summary.key_findings} />
+          <AiSummaryList title="Recommendations" items={summary.recommendations} />
+          <AiSummaryList title="Priority Actions" items={summary.priority_actions} />
+          <AiSummaryList title="Strengths" items={summary.strengths} />
+        </div>
+      ) : (
+        !disabled && <p className="muted">No AI summary generated yet.</p>
+      )}
+    </section>
+  );
+}
+
+function AiSummaryList({ title, items }) {
+  return (
+    <article className="ai-summary-card">
+      <span>{title}</span>
+      {items.length === 0 ? (
+        <p className="muted">No items returned.</p>
+      ) : (
+        <ul>
+          {items.map((item) => <li key={item}>{item}</li>)}
+        </ul>
+      )}
+    </article>
   );
 }
 
