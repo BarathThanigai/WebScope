@@ -8,3 +8,7 @@ python-dotenv
 redis
 rq
 openai
+passlib[bcrypt]
+bcrypt<4
+email-validator
+python-jose[cryptography]

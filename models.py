@@ -1,4 +1,20 @@
+from typing import Literal
+
 from pydantic import AnyHttpUrl, BaseModel, Field
+
+
+UserProvider = Literal["local", "google"]
+
+
+class UserRecord(BaseModel):
+    id: str
+    name: str
+    email: str
+    password_hash: str | None = None
+    provider: UserProvider
+    picture_url: str | None = None
+    created_at: str
+    updated_at: str
 
 
 class CrawlRequest(BaseModel):

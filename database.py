@@ -22,6 +22,7 @@ from models import (
     SiteGraphNode,
     SiteGraphResponse,
     StatsResponse,
+    UserRecord,
 )
 
 try:
@@ -294,6 +295,61 @@ class Database:
                 (job_id,),
             ).fetchone()
         return bool(row and (row["cancel_requested"] or row["status"] == "cancelled"))
+
+    def create_user(self, user: UserRecord) -> UserRecord:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO users (
+                    id, name, email, password_hash, provider,
+                    picture_url, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user.id,
+                    user.name,
+                    user.email.lower(),
+                    user.password_hash,
+                    user.provider,
+                    user.picture_url,
+                    user.created_at,
+                    user.updated_at,
+                ),
+            )
+        created_user = self.get_user_by_id(user.id)
+        if created_user is None:
+            raise RuntimeError("User was not created")
+        return created_user
+
+    def get_user_by_email(self, email: str) -> UserRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, name, email, password_hash, provider,
+                       picture_url, created_at, updated_at
+                FROM users
+                WHERE lower(email) = lower(?)
+                """,
+                (email,),
+            ).fetchone()
+        return self._row_to_user(row) if row else None
+
+    def get_user_by_id(self, user_id: str) -> UserRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, name, email, password_hash, provider,
+                       picture_url, created_at, updated_at
+                FROM users
+                WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        return self._row_to_user(row) if row else None
+
+    def email_exists(self, email: str) -> bool:
+        return self.get_user_by_email(email) is not None
 
     def save_pages(self, pages: list[CrawledPage]) -> None:
         if not pages:
@@ -659,10 +715,30 @@ class Database:
         )
 
     def _create_tables(self, connection: DatabaseSession) -> None:
+        user_id_definition = (
+            "UUID PRIMARY KEY"
+            if self.backend == "postgresql"
+            else "TEXT PRIMARY KEY"
+        )
         page_id_definition = (
             "BIGSERIAL PRIMARY KEY"
             if self.backend == "postgresql"
             else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        )
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS users (
+                id {user_id_definition},
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT,
+                provider TEXT NOT NULL DEFAULT 'local'
+                    CHECK (provider IN ('local', 'google')),
+                picture_url TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
         )
         connection.execute(
             """
@@ -860,6 +936,19 @@ class Database:
                 "UPDATE jobs SET normalized_seed = ? WHERE job_id = ?",
                 (normalized_seed, row["job_id"]),
             )
+
+    @staticmethod
+    def _row_to_user(row: Any) -> UserRecord:
+        return UserRecord(
+            id=str(row["id"]),
+            name=row["name"],
+            email=row["email"],
+            password_hash=row["password_hash"],
+            provider=row["provider"],
+            picture_url=row["picture_url"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     def _get_job_summary(self, job_id: str) -> Any | None:
         with self._connect() as connection:

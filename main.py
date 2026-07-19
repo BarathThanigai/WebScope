@@ -25,6 +25,7 @@ from models import (
     StatsResponse,
 )
 from services.ai.provider import AIProviderError, get_ai_provider
+from services.auth.router import router as auth_router
 from services.crawl_tasks import run_crawl_job
 from services.queue import CRAWL_QUEUE_NAME, USE_RQ, crawl_queue, redis_connection
 
@@ -44,6 +45,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
 
 
 @app.on_event("startup")
@@ -73,6 +75,9 @@ def root() -> dict[str, str | list[str]]:
             "/stats",
             "/health",
             "/queue/health",
+            "/auth/register",
+            "/auth/login",
+            "/auth/me",
         ],
     }
 
