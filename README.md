@@ -12,7 +12,7 @@ It started as a concurrent web crawler and now includes a FastAPI audit backend,
 - Failure reason classification for robots blocks, timeouts, connection errors, rate limits, and HTTP errors
 - Asynchronous crawl jobs with persistent IDs and status tracking
 - Production-style live crawl monitor with SSE updates, heartbeat events, phases, queue depth, worker counts, crawl speed, ETA, and cancellation
-- Safety limits: `max_depth <= 3`, `max_concurrency <= 20`, `max_pages <= 200`
+- Safety limits: `max_depth <= 3`, `max_concurrency <= 20`, `max_pages <= 500`
 - Timeout handling and friendly blocked-site messages
 - Link issue classification for true broken links, crawler-inaccessible URLs, server errors, rate limits, and redirect issues
 - SEO metadata extraction:
