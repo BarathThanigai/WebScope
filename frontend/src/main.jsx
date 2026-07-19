@@ -133,6 +133,12 @@ function DashboardApp({ onHome }) {
   const [aiSummary, setAiSummary] = useState(emptyAiSummary);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
+  const [history, setHistory] = useState({ normalized_seed: "", audits: [] });
+  const [historyError, setHistoryError] = useState("");
+  const [comparison, setComparison] = useState(null);
+  const [comparisonLoading, setComparisonLoading] = useState(false);
+  const [oldAuditId, setOldAuditId] = useState("");
+  const [newAuditId, setNewAuditId] = useState("");
   const [selectedNode, setSelectedNode] = useState(null);
   const [jobSearch, setJobSearch] = useState("");
   const [progress, setProgress] = useState(emptyProgress);
@@ -178,6 +184,41 @@ function DashboardApp({ onHome }) {
     return data;
   }
 
+  async function loadHistory(targetUrl = seedUrl) {
+    if (!targetUrl) return;
+    setHistoryError("");
+    try {
+      const historyData = await request(`/audits/history?seed_url=${encodeURIComponent(targetUrl)}`);
+      setHistory(historyData);
+      setComparison(null);
+      const [newest, previous] = historyData.audits;
+      setNewAuditId(newest?.job_id || "");
+      setOldAuditId(previous?.job_id || "");
+    } catch (err) {
+      setHistoryError(err.message);
+    }
+  }
+
+  async function compareSelectedAudits() {
+    if (!oldAuditId || !newAuditId) {
+      setHistoryError("Choose two completed audits to compare.");
+      return;
+    }
+    setComparisonLoading(true);
+    setHistoryError("");
+    try {
+      const result = await request(
+        `/audits/compare?old_job_id=${encodeURIComponent(oldAuditId)}&new_job_id=${encodeURIComponent(newAuditId)}`,
+      );
+      setComparison(result);
+    } catch (err) {
+      setHistoryError(err.message);
+      setComparison(null);
+    } finally {
+      setComparisonLoading(false);
+    }
+  }
+
   async function loadJob(jobId) {
     if (!jobId) return;
     setError("");
@@ -195,6 +236,7 @@ function DashboardApp({ onHome }) {
     setAiError("");
     setSelectedNode(null);
     setJobSearch(jobId);
+    await loadHistory(jobData.seed_url);
     setProgress((current) => ({
       ...current,
       max_pages: jobData.max_pages,
@@ -356,6 +398,7 @@ function DashboardApp({ onHome }) {
     setGraph({ nodes: [], edges: [] });
     setAiSummary(emptyAiSummary);
     setAiError("");
+    setComparison(null);
     setSelectedNode(null);
     setProgress(emptyProgress);
     setActivity([]);
@@ -493,7 +536,7 @@ function DashboardApp({ onHome }) {
       </section>
 
       <nav className="tabs">
-        {["overview", "pages", "link issues", "seo issues", "performance", "site graph", "ai summary"].map((tab) => (
+        {["overview", "pages", "link issues", "seo issues", "performance", "site graph", "ai summary", "history"].map((tab) => (
           <button key={tab} className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>{tab}</button>
         ))}
       </nav>
@@ -513,6 +556,20 @@ function DashboardApp({ onHome }) {
           error={aiError}
           disabled={!job}
           onGenerate={generateAiSummary}
+        />
+      )}
+      {activeTab === "history" && (
+        <HistoryPanel
+          history={history}
+          error={historyError}
+          comparison={comparison}
+          loading={comparisonLoading}
+          oldAuditId={oldAuditId}
+          newAuditId={newAuditId}
+          setOldAuditId={setOldAuditId}
+          setNewAuditId={setNewAuditId}
+          onRefresh={() => loadHistory(job?.seed_url || seedUrl)}
+          onCompare={compareSelectedAudits}
         />
       )}
     </main>
@@ -856,6 +913,116 @@ function AiSummaryList({ title, items }) {
   );
 }
 
+function HistoryPanel({
+  history,
+  error,
+  comparison,
+  loading,
+  oldAuditId,
+  newAuditId,
+  setOldAuditId,
+  setNewAuditId,
+  onRefresh,
+  onCompare,
+}) {
+  const audits = history.audits || [];
+  return (
+    <section className="history-layout">
+      <div className="panel">
+        <div className="section-header">
+          <div>
+            <h2>Crawl History</h2>
+            <span className="muted">{history.normalized_seed || "No website selected"}</span>
+          </div>
+          <button onClick={onRefresh}>Refresh History</button>
+        </div>
+        {error && <div className="alert error">{error}</div>}
+        <TableShell
+          empty="No completed audits found for this website yet."
+          columns={["Completed", "Job", "Pages", "Health", "SEO", "Broken", "Failed", "Avg Time", "Reason"]}
+        >
+          {audits.map((audit) => (
+            <tr key={audit.job_id}>
+              <td>{formatDateTime(audit.completed_at || audit.started_at)}</td>
+              <td className="url-cell" title={audit.job_id}>{audit.job_id}</td>
+              <td>{audit.pages_crawled}</td>
+              <td>{audit.health_score}%</td>
+              <td>{audit.seo_issues_count}</td>
+              <td>{audit.broken_links_count}</td>
+              <td>{audit.failed_requests}</td>
+              <td>{formatMs(audit.average_response_time_ms)}</td>
+              <td>{formatCompletionReason(audit.completion_reason)}</td>
+            </tr>
+          ))}
+        </TableShell>
+      </div>
+
+      <div className="panel compare-panel">
+        <div className="section-header">
+          <div>
+            <h2>Audit Comparison</h2>
+            <span className="muted">Choose two completed audits from the same website.</span>
+          </div>
+        </div>
+        <div className="compare-controls">
+          <label>
+            Older audit
+            <select value={oldAuditId} onChange={(event) => setOldAuditId(event.target.value)}>
+              <option value="">Select audit</option>
+              {audits.map((audit) => (
+                <option key={`old-${audit.job_id}`} value={audit.job_id}>
+                  {formatDateTime(audit.completed_at || audit.started_at)} - {audit.job_id.slice(0, 8)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Newer audit
+            <select value={newAuditId} onChange={(event) => setNewAuditId(event.target.value)}>
+              <option value="">Select audit</option>
+              {audits.map((audit) => (
+                <option key={`new-${audit.job_id}`} value={audit.job_id}>
+                  {formatDateTime(audit.completed_at || audit.started_at)} - {audit.job_id.slice(0, 8)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="primary" disabled={loading || audits.length < 2} onClick={onCompare}>
+            {loading ? "Comparing..." : "Compare Audits"}
+          </button>
+        </div>
+
+        {comparison ? (
+          <div className="comparison-list">
+            {comparison.metrics.map((metric) => (
+              <ComparisonRow key={metric.metric} metric={metric} />
+            ))}
+          </div>
+        ) : (
+          <p className="muted">Comparison results will appear here after selecting two audits.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ComparisonRow({ metric }) {
+  const tone = metric.direction === "improved" ? "good" : metric.direction === "worsened" ? "bad" : "";
+  return (
+    <article className={`comparison-row ${tone}`}>
+      <span>{formatMetricName(metric.metric)}</span>
+      <strong>
+        {formatMetricValue(metric.metric, metric.old_value)} → {formatMetricValue(metric.metric, metric.new_value)}
+      </strong>
+      <small>
+        {formatDifference(metric)}
+        {metric.percentage_change !== null && ` (${metric.percentage_change > 0 ? "+" : ""}${metric.percentage_change}%)`}
+      </small>
+      <em>{metric.direction}</em>
+    </article>
+  );
+}
+
 function SiteGraph({ graph, selectedNode, setSelectedNode }) {
   const flowNodes = useMemo(() => {
     const depthCounts = new Map();
@@ -938,6 +1105,40 @@ function safePath(url) {
   } catch {
     return url;
   }
+}
+
+function formatDateTime(value) {
+  if (!value) return "Not available";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function formatMetricName(metric) {
+  const labels = {
+    health_score: "Health score",
+    total_pages: "Pages crawled",
+    broken_links_count: "Broken links",
+    seo_issues_count: "SEO issues",
+    failed_requests: "Failed requests",
+    average_response_time_ms: "Average response time",
+    slow_pages_count: "Slow pages",
+  };
+  return labels[metric] || metric.replaceAll("_", " ");
+}
+
+function formatMetricValue(metric, value) {
+  if (metric === "health_score") return `${value}%`;
+  if (metric === "average_response_time_ms") return formatMs(value);
+  return value;
+}
+
+function formatDifference(metric) {
+  const difference = Number(metric.difference || 0);
+  const sign = difference > 0 ? "+" : "";
+  if (metric.metric === "average_response_time_ms") return `${sign}${difference.toFixed(1)} ms`;
+  if (metric.metric === "health_score") return `${sign}${difference}%`;
+  return `${sign}${difference}`;
 }
 
 function TableShell({ columns, empty, children }) {

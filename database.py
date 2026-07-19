@@ -5,13 +5,18 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 from crawler import CrawledPage
 from models import (
+    AuditComparisonResponse,
     BrokenLinkRecord,
+    CrawlHistoryItem,
+    CrawlHistoryResponse,
     CrawlJobResponse,
     CrawlReportResponse,
     CrawlStatusResponse,
+    MetricComparison,
     PageRecord,
     SiteGraphEdge,
     SiteGraphNode,
@@ -98,6 +103,8 @@ class Database:
             self._ensure_schema_columns(connection)
             if self.backend == "sqlite":
                 self._ensure_legacy_job(connection)
+            self._create_indexes(connection)
+            self._backfill_normalized_seed(connection)
 
     def create_job(
         self,
@@ -111,16 +118,17 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, seed_url, max_depth, max_concurrency, max_pages,
+                    job_id, seed_url, normalized_seed, max_depth, max_concurrency, max_pages,
                     status, pages_crawled, pages_discovered, successful_requests,
                     failed_requests, phase, queued_urls, active_workers,
                     pages_per_second, current_depth, current_url, started_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0, ?, 1, 0, 0, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 0, 0, ?, 1, 0, 0, 0, ?, ?)
                 """,
                 (
                     job_id,
                     seed_url,
+                    self.normalize_seed(seed_url),
                     max_depth,
                     max_concurrency,
                     max_pages,
@@ -510,6 +518,91 @@ class Database:
             )[:10],
         )
 
+    def get_crawl_history(self, seed_url: str, limit: int = 20) -> CrawlHistoryResponse:
+        normalized_seed = self.normalize_seed(seed_url)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT job_id, seed_url, normalized_seed, started_at, completed_at,
+                       pages_crawled, failed_requests, completion_reason
+                FROM jobs
+                WHERE normalized_seed = ? AND status = 'completed'
+                ORDER BY completed_at DESC, started_at DESC
+                LIMIT ?
+                """,
+                (normalized_seed, limit),
+            ).fetchall()
+
+        audits: list[CrawlHistoryItem] = []
+        for row in rows:
+            report = self.get_report(row["job_id"])
+            if report is None:
+                continue
+            audits.append(
+                CrawlHistoryItem(
+                    job_id=row["job_id"],
+                    seed_url=row["seed_url"],
+                    normalized_seed=row["normalized_seed"] or normalized_seed,
+                    started_at=row["started_at"],
+                    completed_at=row["completed_at"],
+                    pages_crawled=report.total_pages,
+                    health_score=report.health_score,
+                    seo_issues_count=report.seo_issues_count,
+                    broken_links_count=report.broken_links_count,
+                    failed_requests=row["failed_requests"],
+                    average_response_time_ms=report.average_response_time_ms,
+                    completion_reason=row["completion_reason"],
+                )
+            )
+
+        return CrawlHistoryResponse(normalized_seed=normalized_seed, audits=audits)
+
+    def compare_audits(
+        self, old_job_id: str, new_job_id: str
+    ) -> AuditComparisonResponse | None:
+        old_job = self._get_job_summary(old_job_id)
+        new_job = self._get_job_summary(new_job_id)
+        if old_job is None or new_job is None:
+            return None
+        if old_job["status"] != "completed" or new_job["status"] != "completed":
+            raise ValueError("Only completed crawl jobs can be compared.")
+
+        old_seed = old_job["normalized_seed"] or self.normalize_seed(old_job["seed_url"])
+        new_seed = new_job["normalized_seed"] or self.normalize_seed(new_job["seed_url"])
+        if old_seed != new_seed:
+            raise ValueError("Crawl jobs must belong to the same website to compare.")
+
+        old_report = self.get_report(old_job_id)
+        new_report = self.get_report(new_job_id)
+        if old_report is None or new_report is None:
+            return None
+
+        metric_specs = [
+            ("health_score", "Health score", old_report.health_score, new_report.health_score, True),
+            ("total_pages", "Pages crawled", old_report.total_pages, new_report.total_pages, True),
+            ("broken_links_count", "Broken links", old_report.broken_links_count, new_report.broken_links_count, False),
+            ("seo_issues_count", "SEO issues", old_report.seo_issues_count, new_report.seo_issues_count, False),
+            ("failed_requests", "Failed requests", old_job["failed_requests"], new_job["failed_requests"], False),
+            (
+                "average_response_time_ms",
+                "Average response time",
+                old_report.average_response_time_ms,
+                new_report.average_response_time_ms,
+                False,
+            ),
+            ("slow_pages_count", "Slow pages", old_report.slow_pages_count, new_report.slow_pages_count, False),
+        ]
+
+        return AuditComparisonResponse(
+            old_job_id=old_job_id,
+            new_job_id=new_job_id,
+            normalized_seed=old_seed,
+            metrics=[
+                self._compare_metric(metric, label, old_value, new_value, higher_is_better)
+                for metric, label, old_value, new_value, higher_is_better in metric_specs
+            ],
+        )
+
     def get_site_graph(self, job_id: str) -> SiteGraphResponse | None:
         if self.get_crawl_job(job_id) is None:
             return None
@@ -577,6 +670,7 @@ class Database:
                 job_id TEXT PRIMARY KEY,
                 rq_job_id TEXT,
                 seed_url TEXT NOT NULL,
+                normalized_seed TEXT,
                 max_depth INTEGER NOT NULL,
                 max_concurrency INTEGER NOT NULL,
                 max_pages INTEGER NOT NULL DEFAULT 50,
@@ -618,6 +712,11 @@ class Database:
                 FOREIGN KEY(job_id) REFERENCES jobs(job_id)
             )
             """
+        )
+
+    def _create_indexes(self, connection: DatabaseSession) -> None:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_normalized_seed ON jobs(normalized_seed)"
         )
 
     def _migrate_legacy_pages_table(self, connection: DatabaseSession) -> None:
@@ -688,6 +787,7 @@ class Database:
         job_column_definitions = {
             "max_pages": "INTEGER NOT NULL DEFAULT 50",
             "rq_job_id": "TEXT",
+            "normalized_seed": "TEXT",
             "status": "TEXT NOT NULL DEFAULT 'completed'",
             "outcome": "TEXT",
             "pages_crawled": "INTEGER NOT NULL DEFAULT 0",
@@ -742,6 +842,75 @@ class Database:
         return {
             row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")
         }
+
+    def _backfill_normalized_seed(self, connection: DatabaseSession) -> None:
+        rows = connection.execute(
+            """
+            SELECT job_id, seed_url, normalized_seed
+            FROM jobs
+            """
+        ).fetchall()
+        for row in rows:
+            normalized_seed = self.normalize_seed(row["seed_url"])
+            if row["normalized_seed"] == normalized_seed:
+                continue
+            if row["normalized_seed"] not in {None, "", row["seed_url"]}:
+                continue
+            connection.execute(
+                "UPDATE jobs SET normalized_seed = ? WHERE job_id = ?",
+                (normalized_seed, row["job_id"]),
+            )
+
+    def _get_job_summary(self, job_id: str) -> Any | None:
+        with self._connect() as connection:
+            return connection.execute(
+                """
+                SELECT job_id, seed_url, normalized_seed, status, failed_requests
+                FROM jobs
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+
+    @staticmethod
+    def _compare_metric(
+        metric: str,
+        label: str,
+        old_value: float | int,
+        new_value: float | int,
+        higher_is_better: bool,
+    ) -> MetricComparison:
+        difference = new_value - old_value
+        if old_value == 0:
+            percentage_change = None if new_value == 0 else 100.0
+        else:
+            percentage_change = round((difference / old_value) * 100, 2)
+
+        if difference == 0:
+            direction = "unchanged"
+        elif (difference > 0 and higher_is_better) or (difference < 0 and not higher_is_better):
+            direction = "improved"
+        else:
+            direction = "worsened"
+
+        return MetricComparison(
+            metric=metric,
+            old_value=round(old_value, 2) if isinstance(old_value, float) else old_value,
+            new_value=round(new_value, 2) if isinstance(new_value, float) else new_value,
+            difference=round(difference, 2) if isinstance(difference, float) else difference,
+            percentage_change=percentage_change,
+            direction=direction,
+        )
+
+    @staticmethod
+    def normalize_seed(seed_url: str) -> str:
+        parsed = urlparse(seed_url.strip())
+        host = parsed.netloc.lower()
+        if not host and parsed.path:
+            host = parsed.path.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host.rstrip("/") or seed_url.strip().lower()
 
     @staticmethod
     def _row_to_page(row: Any) -> PageRecord:

@@ -117,6 +117,42 @@ class CrawlReportResponse(BaseModel):
     top_10_slowest_pages: list[PageRecord]
 
 
+class CrawlHistoryItem(BaseModel):
+    job_id: str
+    seed_url: str
+    normalized_seed: str
+    started_at: str
+    completed_at: str | None
+    pages_crawled: int
+    health_score: int
+    seo_issues_count: int
+    broken_links_count: int
+    failed_requests: int
+    average_response_time_ms: float
+    completion_reason: str | None = None
+
+
+class CrawlHistoryResponse(BaseModel):
+    normalized_seed: str
+    audits: list[CrawlHistoryItem]
+
+
+class MetricComparison(BaseModel):
+    metric: str
+    old_value: float | int
+    new_value: float | int
+    difference: float | int
+    percentage_change: float | None = None
+    direction: str
+
+
+class AuditComparisonResponse(BaseModel):
+    old_job_id: str
+    new_job_id: str
+    normalized_seed: str
+    metrics: list[MetricComparison]
+
+
 class AISummaryResponse(BaseModel):
     executive_summary: str
     overall_assessment: str
