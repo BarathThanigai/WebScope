@@ -12,7 +12,9 @@ from config import ALLOWED_ORIGINS
 from database import Database, get_database
 from models import (
     AISummaryResponse,
+    AuditComparisonResponse,
     BrokenLinkRecord,
+    CrawlHistoryResponse,
     CrawlJobResponse,
     CrawlReportResponse,
     CrawlRequest,
@@ -65,6 +67,8 @@ def root() -> dict[str, str | list[str]]:
             "/crawl/{job_id}/report",
             "/crawl/{job_id}/ai-summary",
             "/crawl/{job_id}/export/csv",
+            "/audits/history",
+            "/audits/compare",
             "/pages",
             "/stats",
             "/health",
@@ -275,6 +279,30 @@ def crawl_report(job_id: str, db: Database = Depends(get_database)) -> CrawlRepo
     if report is None:
         raise HTTPException(status_code=404, detail="Crawl job not found")
     return report
+
+
+@app.get("/audits/history", response_model=CrawlHistoryResponse)
+def audit_history(
+    seed_url: str = Query(..., min_length=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Database = Depends(get_database),
+) -> CrawlHistoryResponse:
+    return db.get_crawl_history(seed_url, limit)
+
+
+@app.get("/audits/compare", response_model=AuditComparisonResponse)
+def compare_audits(
+    old_job_id: str = Query(..., min_length=1),
+    new_job_id: str = Query(..., min_length=1),
+    db: Database = Depends(get_database),
+) -> AuditComparisonResponse:
+    try:
+        comparison = db.compare_audits(old_job_id, new_job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if comparison is None:
+        raise HTTPException(status_code=404, detail="One or both crawl jobs were not found")
+    return comparison
 
 
 @app.post("/crawl/{job_id}/ai-summary", response_model=AISummaryResponse)
