@@ -41,6 +41,7 @@ const emptyProgress = {
   queued_urls: 0,
   active_workers: 0,
   pages_per_second: 0,
+  max_concurrency: 8,
   current_depth: 0,
   current_url: "",
   max_pages: 0,
@@ -88,6 +89,30 @@ function formatOutcomeLabel(progress) {
     return "Completed successfully";
   }
   return progress.status;
+}
+
+function formatRequestError(data) {
+  const detail = data.detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => `${item.loc?.slice(1).join(".") || "field"}: ${item.msg}`)
+      .join(" ");
+  }
+  if (typeof detail === "string") return detail;
+  return detail?.message || "The API request failed.";
+}
+
+function validateCrawlSettings({ maxConcurrency, maxPages }) {
+  const concurrency = Number(maxConcurrency);
+  const pages = Number(maxPages);
+
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 20) {
+    return "Concurrency must be a whole number between 1 and 20.";
+  }
+  if (!Number.isInteger(pages) || pages < 1 || pages > 500) {
+    return "Maximum pages must be a whole number between 1 and 500.";
+  }
+  return "";
 }
 
 function DashboardApp({ onHome }) {
@@ -148,11 +173,7 @@ function DashboardApp({ onHome }) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const detail = data.detail;
-      const message = typeof detail === "string"
-        ? detail
-        : detail?.message || "The API request failed.";
-      throw new Error(message);
+      throw new Error(formatRequestError(data));
     }
     return data;
   }
@@ -177,6 +198,7 @@ function DashboardApp({ onHome }) {
     setProgress((current) => ({
       ...current,
       max_pages: jobData.max_pages,
+      max_concurrency: jobData.max_concurrency,
     }));
     setActivity(
       jobData.pages
@@ -319,6 +341,12 @@ function DashboardApp({ onHome }) {
 
   async function startCrawl(event) {
     event.preventDefault();
+    const validationError = validateCrawlSettings({ maxConcurrency, maxPages });
+    if (validationError) {
+      setError(validationError);
+      setMessage("");
+      return;
+    }
     closeProgressStream();
     setLoading(true);
     setError("");
@@ -348,6 +376,7 @@ function DashboardApp({ onHome }) {
         job_id: result.job_id,
         status: result.status,
         max_pages: Number(maxPages),
+        max_concurrency: Number(maxConcurrency),
       }));
       setJobSearch(result.job_id);
       setActiveTab("overview");
@@ -401,6 +430,7 @@ function DashboardApp({ onHome }) {
     setProgress((current) => ({
       ...current,
       max_pages: jobData.max_pages,
+      max_concurrency: jobData.max_concurrency,
     }));
     if (terminalStatuses.has(status.status)) {
       setLoading(false);
@@ -446,7 +476,7 @@ function DashboardApp({ onHome }) {
           <label>Seed URL<input value={seedUrl} onChange={(event) => setSeedUrl(event.target.value)} /></label>
           <label>Max depth<input type="number" min="0" max="3" value={maxDepth} onChange={(event) => setMaxDepth(event.target.value)} /></label>
           <label>Concurrency<input type="number" min="1" max="20" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} /></label>
-          <label>Max pages<input type="number" min="1" max="200" value={maxPages} onChange={(event) => setMaxPages(event.target.value)} /></label>
+          <label>Max pages<input type="number" min="1" max="500" value={maxPages} onChange={(event) => setMaxPages(event.target.value)} /></label>
           <button className="primary" disabled={loading}>{loading ? "Auditing..." : "Start Audit"}</button>
         </form>
         <p className="crawler-note">WebScope audits publicly crawlable pages only. Some websites may block crawlers due to robots.txt, anti-bot rules, rate limits, or JavaScript-heavy pages.</p>
@@ -508,6 +538,7 @@ function ProgressPanel({ progress, loading, activity, onCancel }) {
   const discovered = Number(progress.pages_discovered || 0);
   const crawled = Number(progress.pages_crawled || 0);
   const crawlLimit = Number(progress.max_pages || 0);
+  const selectedConcurrency = Number(progress.max_concurrency || 0);
   const speed = Number(progress.pages_per_second || 0);
   const denominator = Math.min(Math.max(discovered, 1), crawlLimit || Math.max(discovered, 1));
   const rawPercent = denominator > 0 ? Math.round((crawled / denominator) * 100) : 0;
@@ -569,6 +600,7 @@ function ProgressPanel({ progress, loading, activity, onCancel }) {
         <ReportRow label="URLs discovered" value={progress.pages_discovered} />
         <ReportRow label="Queued URLs" value={progress.queued_urls} />
         <ReportRow label="Active workers" value={progress.active_workers} />
+        <ReportRow label="Selected concurrency" value={selectedConcurrency || "Not set"} />
         <ReportRow label="Crawl page limit" value={crawlLimit || "Not set"} />
         <ReportRow label="Crawl speed" value={`${speed.toFixed(2)} pages/s`} />
         <ReportRow label="ETA" value={eta} />

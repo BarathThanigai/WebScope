@@ -4,8 +4,8 @@ from pydantic import AnyHttpUrl, BaseModel, Field
 class CrawlRequest(BaseModel):
     seed_url: AnyHttpUrl
     max_depth: int = Field(ge=0, le=3)
-    max_concurrency: int = Field(ge=1, le=20)
-    max_pages: int = Field(default=50, ge=1, le=200)
+    max_concurrency: int = Field(default=8, ge=1, le=20)
+    max_pages: int = Field(default=50, ge=1, le=500)
 
 
 class PageRecord(BaseModel):
