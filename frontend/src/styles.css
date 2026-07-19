@@ -926,6 +926,71 @@ button:disabled { cursor: not-allowed; opacity: 0.65; }
   color: var(--accent);
 }
 
+.user-chip {
+  align-items: center;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: 999px;
+  color: var(--accent);
+  display: inline-flex;
+  font-size: 0.86rem;
+  font-weight: 900;
+  min-height: 38px;
+  padding: 8px 12px;
+}
+
+.auth-page {
+  display: grid;
+  margin: 0 auto;
+  min-height: 100vh;
+  padding: 24px 0 42px;
+  width: min(960px, calc(100% - 32px));
+}
+
+.auth-topbar {
+  align-self: start;
+}
+
+.auth-card {
+  align-self: center;
+  justify-self: center;
+  max-width: 520px;
+  width: 100%;
+}
+
+.auth-card h1 {
+  font-size: clamp(2.2rem, 6vw, 3.6rem);
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.auth-form button {
+  margin-top: 4px;
+}
+
+.auth-switch {
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 18px 0 0;
+  text-align: center;
+}
+
+.auth-switch button {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  font-weight: 900;
+  padding: 0;
+}
+
+.auth-switch button:hover {
+  transform: none;
+}
+
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 260px;

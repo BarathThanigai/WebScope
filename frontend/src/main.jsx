@@ -2,11 +2,12 @@
 import { createRoot } from "react-dom/client";
 import ReactFlow, { Background, Controls, MiniMap } from "reactflow";
 import "reactflow/dist/style.css";
+import { API_URL, apiRequest } from "./api";
+import { AuthProvider, useAuth } from "./auth/AuthContext";
+import { LoginPage, RegisterPage } from "./auth/AuthPages";
 import LandingPage from "./components/landing/LandingPage";
 import { ThemeProvider, useTheme } from "./theme/ThemeContext";
 import "./styles.css";
-
-const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 const emptyReport = {
   total_pages: 0,
@@ -91,17 +92,6 @@ function formatOutcomeLabel(progress) {
   return progress.status;
 }
 
-function formatRequestError(data) {
-  const detail = data.detail;
-  if (Array.isArray(detail)) {
-    return detail
-      .map((item) => `${item.loc?.slice(1).join(".") || "field"}: ${item.msg}`)
-      .join(" ");
-  }
-  if (typeof detail === "string") return detail;
-  return detail?.message || "The API request failed.";
-}
-
 function validateCrawlSettings({ maxConcurrency, maxPages }) {
   const concurrency = Number(maxConcurrency);
   const pages = Number(maxPages);
@@ -115,8 +105,9 @@ function validateCrawlSettings({ maxConcurrency, maxPages }) {
   return "";
 }
 
-function DashboardApp({ onHome }) {
+function DashboardApp({ onHome, onLogout }) {
   const { theme, toggleTheme } = useTheme();
+  const { user, logout } = useAuth();
   const [seedUrl, setSeedUrl] = useState("https://books.toscrape.com");
   const [maxDepth, setMaxDepth] = useState(1);
   const [maxConcurrency, setMaxConcurrency] = useState(8);
@@ -173,15 +164,7 @@ function DashboardApp({ onHome }) {
   );
 
   async function request(path, options) {
-    const response = await fetch(`${API_URL}${path}`, {
-      headers: { "Content-Type": "application/json" },
-      ...options,
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(formatRequestError(data));
-    }
-    return data;
+    return apiRequest(path, options);
   }
 
   async function loadHistory(targetUrl = seedUrl) {
@@ -451,6 +434,12 @@ function DashboardApp({ onHome }) {
     window.open(`${API_URL}/crawl/${job.job_id}/export/csv`, "_blank", "noopener,noreferrer");
   }
 
+  function handleLogout() {
+    closeProgressStream();
+    logout();
+    onLogout();
+  }
+
   async function generateAiSummary() {
     if (!job?.job_id) return;
     setAiLoading(true);
@@ -492,9 +481,11 @@ function DashboardApp({ onHome }) {
         <nav className="dashboard-nav" aria-label="Dashboard navigation">
           <button onClick={onHome}>Back to Home</button>
           <a href="#" aria-label="View WebScope on GitHub">GitHub</a>
+          {user && <span className="user-chip">{user.name}</span>}
           <button className="theme-toggle" onClick={toggleTheme}>
             {theme === "dark" ? "Light" : "Dark"} Mode
           </button>
+          <button onClick={handleLogout}>Logout</button>
         </nav>
       </header>
 
@@ -1161,17 +1152,87 @@ function StatusPill({ page }) {
 }
 
 function App() {
-  const [showDashboard, setShowDashboard] = useState(false);
+  const { isAuthenticated, loading, login, register } = useAuth();
+  const [view, setView] = useState(() => (
+    window.localStorage.getItem("webscope_access_token") ? "dashboard" : "home"
+  ));
 
-  if (showDashboard) {
-    return <DashboardApp onHome={() => setShowDashboard(false)} />;
+  useEffect(() => {
+    if (loading) return;
+    if (isAuthenticated && (view === "login" || view === "register")) {
+      setView("dashboard");
+    }
+    if (!isAuthenticated && view === "dashboard") {
+      setView("login");
+    }
+  }, [isAuthenticated, loading, view]);
+
+  if (loading) {
+    return (
+      <main className="auth-page">
+        <section className="auth-card panel">
+          <p className="eyebrow">WebScope</p>
+          <h1>Loading</h1>
+          <p className="hero-copy">Restoring your session.</p>
+        </section>
+      </main>
+    );
   }
 
-  return <LandingPage onLaunch={() => setShowDashboard(true)} />;
+  if (view === "dashboard") {
+    if (!isAuthenticated) {
+      return (
+        <LoginPage
+          login={login}
+          onLogin={() => setView("dashboard")}
+          onRegister={() => setView("register")}
+          onHome={() => setView("home")}
+        />
+      );
+    }
+    return (
+      <DashboardApp
+        onHome={() => setView("home")}
+        onLogout={() => setView("login")}
+      />
+    );
+  }
+
+  if (view === "login") {
+    if (isAuthenticated) {
+      return <DashboardApp onHome={() => setView("home")} onLogout={() => setView("login")} />;
+    }
+    return (
+      <LoginPage
+        login={login}
+        onLogin={() => setView("dashboard")}
+        onRegister={() => setView("register")}
+        onHome={() => setView("home")}
+      />
+    );
+  }
+
+  if (view === "register") {
+    if (isAuthenticated) {
+      return <DashboardApp onHome={() => setView("home")} onLogout={() => setView("login")} />;
+    }
+    return (
+      <RegisterPage
+        register={register}
+        onRegisterComplete={() => setView("dashboard")}
+        onLogin={() => setView("login")}
+        onHome={() => setView("home")}
+      />
+    );
+  }
+
+  return <LandingPage onLaunch={() => setView(isAuthenticated ? "dashboard" : "login")} />;
 }
 
 createRoot(document.getElementById("root")).render(
   <ThemeProvider>
-    <App />
+    <AuthProvider>
+      <App />
+    </AuthProvider>
   </ThemeProvider>,
 );
