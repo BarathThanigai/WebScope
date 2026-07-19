@@ -12,6 +12,10 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 
+class ResponseTooLargeError(Exception):
+    """Raised when a response exceeds the crawler's configured body limit."""
+
+
 @dataclass(slots=True)
 class CrawledPage:
     job_id: str
@@ -46,9 +50,11 @@ class ConcurrentCrawler:
         max_concurrency: int,
         max_pages: int,
         timeout_seconds: int = 15,
-        crawl_delay_seconds: float = 0.5,
+        crawl_delay_seconds: float = 0.2,
         max_retries: int = 2,
+        max_body_bytes: int = 1_500_000,
         progress_callback: Callable[[dict], Awaitable[None] | None] | None = None,
+        page_batch_callback: Callable[[list[CrawledPage]], Awaitable[None] | None] | None = None,
         should_cancel: Callable[[], Awaitable[bool] | bool] | None = None,
     ) -> None:
         self.job_id = job_id
@@ -61,11 +67,16 @@ class ConcurrentCrawler:
         self.user_agent = "WebScopeBot/1.1 (+https://github.com/webscope-audit)"
         self.crawl_delay_seconds = crawl_delay_seconds
         self.max_retries = max_retries
+        self.max_body_bytes = max_body_bytes
         self.progress_callback = progress_callback
+        self.page_batch_callback = page_batch_callback
         self.should_cancel = should_cancel
         self.completion_reason = "queue_exhausted"
         self._request_lock = asyncio.Lock()
         self._last_request_at = 0.0
+        self._robots_cache: dict[str, urllib.robotparser.RobotFileParser] = {}
+        self._internal_url_cache: dict[str, bool] = {}
+        self._normalize_cache: dict[str, str | None] = {}
 
         if not self.seed_host:
             raise ValueError("seed_url must be an absolute URL")
@@ -76,9 +87,27 @@ class ConcurrentCrawler:
         results: list[CrawledPage] = []
         semaphore = asyncio.Semaphore(self.max_concurrency)
         crawl_started_at = time.perf_counter()
+        successful_requests = 0
+        failed_requests = 0
 
         headers = {"User-Agent": self.user_agent}
-        async with aiohttp.ClientSession(timeout=self.timeout, headers=headers) as session:
+        connector = aiohttp.TCPConnector(
+            limit=self.max_concurrency,
+            limit_per_host=self.max_concurrency,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+        )
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout.total,
+            connect=min(5, self.timeout.total or 5),
+            sock_connect=min(5, self.timeout.total or 5),
+            sock_read=min(10, self.timeout.total or 10),
+        )
+        async with aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers=headers,
+        ) as session:
             await self._emit_progress(
                 phase="checking_robots",
                 pages_crawled=0,
@@ -144,8 +173,8 @@ class ConcurrentCrawler:
                         phase="crawling",
                         pages_crawled=len(results),
                         pages_discovered=len(seen),
-                        successful_requests=sum(1 for page in results if page.success),
-                        failed_requests=sum(1 for page in results if not page.success),
+                        successful_requests=successful_requests,
+                        failed_requests=failed_requests,
                         queued_urls=len(queue),
                         active_workers=min(len(batch), self.max_concurrency),
                         pages_per_second=self._pages_per_second(len(results), crawl_started_at),
@@ -160,6 +189,9 @@ class ConcurrentCrawler:
                     )
                 )
                 results.extend(pages)
+                successful_requests += sum(1 for page in pages if page.success)
+                failed_requests += sum(1 for page in pages if not page.success)
+                await self._emit_page_batch(pages)
 
                 if await self._should_cancel():
                     self.completion_reason = "cancelled_by_user"
@@ -169,7 +201,7 @@ class ConcurrentCrawler:
                             continue
 
                         for link in page.links:
-                            if link not in seen:
+                            if link not in seen and self._is_probably_page_url(link):
                                 seen.add(link)
                                 queue.append((link, page.depth + 1, page.url))
 
@@ -177,8 +209,8 @@ class ConcurrentCrawler:
                     phase="crawling",
                     pages_crawled=len(results),
                     pages_discovered=len(seen),
-                    successful_requests=sum(1 for page in results if page.success),
-                    failed_requests=sum(1 for page in results if not page.success),
+                    successful_requests=successful_requests,
+                    failed_requests=failed_requests,
                     queued_urls=len(queue),
                     active_workers=0,
                     pages_per_second=self._pages_per_second(len(results), crawl_started_at),
@@ -204,6 +236,14 @@ class ConcurrentCrawler:
             return
 
         result = self.progress_callback(progress)
+        if result is not None:
+            await result
+
+    async def _emit_page_batch(self, pages: list[CrawledPage]) -> None:
+        if not pages or self.page_batch_callback is None:
+            return
+
+        result = self.page_batch_callback(pages)
         if result is not None:
             await result
 
@@ -245,19 +285,32 @@ class ConcurrentCrawler:
                 started_at = time.perf_counter()
                 try:
                     async with session.get(url, allow_redirects=True) as response:
+                        if self._content_length_exceeds_limit(response):
+                            elapsed_ms = (time.perf_counter() - started_at) * 1000
+                            return self._failed_page(
+                                url,
+                                depth,
+                                source_url,
+                                "response_too_large",
+                                self._response_too_large_message(response.content_length),
+                                elapsed_ms,
+                                response.status,
+                            )
+
                         content_type = response.headers.get("content-type", "")
-                        body = (
-                            await response.text(errors="ignore")
-                            if "text/html" in content_type
-                            else ""
-                        )
+                        is_html = self._is_html_content_type(content_type)
+                        body = await self._read_limited_text(response) if is_html else ""
                         elapsed_ms = (time.perf_counter() - started_at) * 1000
 
                         if self._should_retry(response.status, attempt):
                             await asyncio.sleep(2**attempt)
                             continue
 
-                        metadata = self._parse_html(body, str(response.url))
+                        metadata = (
+                            self._parse_html(body, str(response.url))
+                            if is_html
+                            else self._empty_metadata()
+                        )
                         error_type = self._classify_http_status(response.status)
 
                         return CrawledPage(
@@ -301,6 +354,26 @@ class ConcurrentCrawler:
                         "Redirect loop or too many redirects",
                         elapsed_ms,
                     )
+                except ResponseTooLargeError as exc:
+                    elapsed_ms = (time.perf_counter() - started_at) * 1000
+                    return self._failed_page(
+                        url,
+                        depth,
+                        source_url,
+                        "response_too_large",
+                        str(exc),
+                        elapsed_ms,
+                    )
+                except aiohttp.ClientPayloadError as exc:
+                    elapsed_ms = (time.perf_counter() - started_at) * 1000
+                    return self._failed_page(
+                        url,
+                        depth,
+                        source_url,
+                        "connection_error",
+                        str(exc) or "Response payload could not be read",
+                        elapsed_ms,
+                    )
                 except aiohttp.ClientError as exc:
                     elapsed_ms = (time.perf_counter() - started_at) * 1000
                     if attempt < self.max_retries:
@@ -322,6 +395,9 @@ class ConcurrentCrawler:
     async def _load_robots_parser(
         self, session: aiohttp.ClientSession
     ) -> urllib.robotparser.RobotFileParser:
+        if self.seed_host in self._robots_cache:
+            return self._robots_cache[self.seed_host]
+
         robots_url = f"{urlparse(self.seed_url).scheme}://{self.seed_host}/robots.txt"
         parser = urllib.robotparser.RobotFileParser(robots_url)
 
@@ -335,6 +411,7 @@ class ConcurrentCrawler:
             # If robots.txt cannot be fetched, proceed as allowed rather than failing the crawl.
             parser.parse([])
 
+        self._robots_cache[self.seed_host] = parser
         return parser
 
     async def _discover_sitemap_urls(
@@ -364,10 +441,11 @@ class ConcurrentCrawler:
         for element in root.iter():
             if not element.tag.endswith("loc") or not element.text:
                 continue
-            normalized = self._safe_normalize(element.text.strip())
+            normalized = self._safe_normalize_cached(element.text.strip())
             if (
                 normalized
                 and self._is_internal_url(normalized)
+                and self._is_probably_page_url(normalized)
                 and robots.can_fetch(self.user_agent, normalized)
             ):
                 urls.append(normalized)
@@ -414,6 +492,7 @@ class ConcurrentCrawler:
         error_type: str,
         error: str,
         response_time_ms: float = 0.0,
+        status_code: int | None = None,
     ) -> CrawledPage:
         return CrawledPage(
             job_id=self.job_id,
@@ -429,7 +508,7 @@ class ConcurrentCrawler:
             missing_description=True,
             missing_h1=True,
             is_slow=response_time_ms > 1000,
-            status_code=None,
+            status_code=status_code,
             depth=depth,
             links=[],
             response_time_ms=round(response_time_ms, 2),
@@ -439,16 +518,58 @@ class ConcurrentCrawler:
             error=error or "Request failed",
         )
 
+    async def _read_limited_text(self, response: aiohttp.ClientResponse) -> str:
+        chunks: list[bytes] = []
+        total_bytes = 0
+        async for chunk in response.content.iter_chunked(65536):
+            total_bytes += len(chunk)
+            if total_bytes > self.max_body_bytes:
+                raise ResponseTooLargeError(self._response_too_large_message(total_bytes))
+            chunks.append(chunk)
+
+        charset = response.charset or "utf-8"
+        return b"".join(chunks).decode(charset, errors="ignore")
+
+    def _content_length_exceeds_limit(self, response: aiohttp.ClientResponse) -> bool:
+        return response.content_length is not None and response.content_length > self.max_body_bytes
+
+    def _response_too_large_message(self, observed_bytes: int | None = None) -> str:
+        limit_mb = self.max_body_bytes / (1024 * 1024)
+        if observed_bytes is None:
+            return (
+                "Response body exceeded the configured size limit of "
+                f"{limit_mb:.2f} MB ({self.max_body_bytes:,} bytes)."
+            )
+
+        observed_mb = observed_bytes / (1024 * 1024)
+        return (
+            f"Response body was {observed_mb:.2f} MB ({observed_bytes:,} bytes), "
+            f"which exceeds the configured size limit of {limit_mb:.2f} MB "
+            f"({self.max_body_bytes:,} bytes)."
+        )
+
+    @staticmethod
+    def _is_html_content_type(content_type: str) -> bool:
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        return media_type in {
+            "text/html",
+            "application/xhtml+xml",
+        }
+
+    @staticmethod
+    def _empty_metadata() -> dict:
+        return {
+            "title": "",
+            "meta_description": "",
+            "h1_tags": [],
+            "canonical_url": None,
+            "word_count": 0,
+            "links": [],
+        }
+
     def _parse_html(self, html: str, base_url: str) -> dict:
         if not html:
-            return {
-                "title": "",
-                "meta_description": "",
-                "h1_tags": [],
-                "canonical_url": None,
-                "word_count": 0,
-                "links": [],
-            }
+            return self._empty_metadata()
 
         soup = BeautifulSoup(html, "html.parser")
         title_tag = soup.find("title")
@@ -482,13 +603,15 @@ class ConcurrentCrawler:
 
         for anchor in anchors:
             try:
-                normalized = self._normalize_url(urljoin(base_url, anchor["href"]))
+                normalized = self._normalize_url_cached(urljoin(base_url, anchor["href"]))
             except ValueError:
                 continue
 
-            parsed = urlparse(normalized)
-
-            if parsed.scheme in {"http", "https"} and parsed.netloc.lower() == self.seed_host:
+            if (
+                normalized
+                and self._is_internal_url(normalized)
+                and self._is_probably_page_url(normalized)
+            ):
                 links.add(normalized)
 
         return links
@@ -509,9 +632,35 @@ class ConcurrentCrawler:
         except ValueError:
             return None
 
+    def _normalize_url_cached(self, url: str) -> str | None:
+        if url not in self._normalize_cache:
+            self._normalize_cache[url] = self._safe_normalize(url)
+        return self._normalize_cache[url]
+
+    def _safe_normalize_cached(self, url: str) -> str | None:
+        return self._normalize_url_cached(url)
+
     def _is_internal_url(self, url: str) -> bool:
+        if url in self._internal_url_cache:
+            return self._internal_url_cache[url]
+
         parsed = urlparse(url)
-        return parsed.scheme in {"http", "https"} and parsed.netloc.lower() == self.seed_host
+        is_internal = parsed.scheme in {"http", "https"} and parsed.netloc.lower() == self.seed_host
+        self._internal_url_cache[url] = is_internal
+        return is_internal
+
+    @staticmethod
+    def _is_probably_page_url(url: str) -> bool:
+        path = urlparse(url).path.lower()
+        blocked_extensions = (
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".bmp",
+            ".mp4", ".webm", ".mov", ".avi", ".mp3", ".wav", ".ogg",
+            ".woff", ".woff2", ".ttf", ".otf", ".eot",
+            ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2",
+            ".exe", ".dmg", ".pkg", ".msi", ".deb", ".rpm",
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        )
+        return not path.endswith(blocked_extensions)
 
     @staticmethod
     def _utc_now() -> str:

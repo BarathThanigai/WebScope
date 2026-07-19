@@ -43,6 +43,9 @@ async def _run_crawl_job_async(
         async def should_cancel() -> bool:
             return await asyncio.to_thread(db.is_cancel_requested, job_id)
 
+        async def save_page_batch(pages: list[CrawledPage]) -> None:
+            await asyncio.to_thread(db.save_pages, pages)
+
         crawler = ConcurrentCrawler(
             job_id=job_id,
             seed_url=seed_url,
@@ -50,6 +53,7 @@ async def _run_crawl_job_async(
             max_concurrency=max_concurrency,
             max_pages=max_pages,
             progress_callback=update_progress,
+            page_batch_callback=save_page_batch,
             should_cancel=should_cancel,
         )
         pages = await crawler.crawl()
@@ -78,7 +82,6 @@ async def _run_crawl_job_async(
             completion_reason=completion_reason,
             outcome=outcome,
         )
-        await asyncio.to_thread(db.save_pages, pages)
         current_status = await asyncio.to_thread(db.get_job_status, job_id)
         await asyncio.to_thread(
             db.update_job_progress,
